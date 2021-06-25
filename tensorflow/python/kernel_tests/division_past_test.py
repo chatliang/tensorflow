@@ -14,7 +14,7 @@
 # ==============================================================================
 """Tests for division with division imported from __future__.
 
-This file should be exactly the same as division_past_test.py except
+This file should be exactly the same as division_future_test.py except
 for the __future__ division line.
 """
 
@@ -46,10 +46,10 @@ class DivisionTestCase(test.TestCase):
       tensors.append((x, y))
       def f(x, y):
         self.assertEqual(x.dtype, y.dtype)
-        self.assertEqual(x, y)
+        self.assertAllClose(x, y)
       checks.append(f)
 
-    with self.test_session() as sess:
+    with self.cached_session() as sess:
       for dtype in dtypes:
         for x in map(dtype, values):
           for y in map(dtype, values):
@@ -64,7 +64,7 @@ class DivisionTestCase(test.TestCase):
                 tf_floordiv = tf_x // tf_y
                 check(floordiv, tf_floordiv)
       # Do only one sess.run for speed
-      for f, (x, y) in zip(checks, sess.run(tensors)):
+      for f, (x, y) in zip(checks, self.evaluate(tensors)):
         f(x, y)
 
 

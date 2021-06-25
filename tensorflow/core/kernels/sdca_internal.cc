@@ -18,12 +18,17 @@ limitations under the License.
 #include "tensorflow/core/kernels/sdca_internal.h"
 
 #include <limits>
+#include <numeric>
 #include <random>
 
 #include "third_party/eigen3/unsupported/Eigen/CXX11/Tensor"
 #include "tensorflow/core/lib/gtl/flatset.h"
 #include "tensorflow/core/lib/math/math_util.h"
 #include "tensorflow/core/lib/random/simple_philox.h"
+
+#if defined(TENSORFLOW_USE_CUSTOM_CONTRACTION_KERNEL)
+#include "tensorflow/core/kernels/eigen_contraction_kernel.h"
+#endif
 
 namespace tensorflow {
 namespace sdca {
@@ -94,6 +99,10 @@ Status ModelWeights::Initialize(OpKernelContext* const context) {
   OpInputList sparse_weights_inputs;
   TF_RETURN_IF_ERROR(
       context->input_list("sparse_weights", &sparse_weights_inputs));
+  if (sparse_indices_inputs.size() != sparse_weights_inputs.size())
+    return errors::InvalidArgument(
+        "sparse_indices and sparse_weights must have the same length, got ",
+        sparse_indices_inputs.size(), " and ", sparse_weights_inputs.size());
   OpInputList dense_weights_inputs;
   TF_RETURN_IF_ERROR(
       context->input_list("dense_weights", &dense_weights_inputs));
@@ -101,10 +110,20 @@ Status ModelWeights::Initialize(OpKernelContext* const context) {
   OpOutputList sparse_weights_outputs;
   TF_RETURN_IF_ERROR(context->output_list("out_delta_sparse_weights",
                                           &sparse_weights_outputs));
+  if (sparse_weights_outputs.size() != sparse_weights_inputs.size())
+    return errors::InvalidArgument(
+        "out_delta_sparse_weights and sparse_weights must have the same "
+        "length, got ",
+        sparse_weights_outputs.size(), " and ", sparse_weights_inputs.size());
 
   OpOutputList dense_weights_outputs;
   TF_RETURN_IF_ERROR(
       context->output_list("out_delta_dense_weights", &dense_weights_outputs));
+  if (dense_weights_outputs.size() != dense_weights_inputs.size())
+    return errors::InvalidArgument(
+        "out_delta_dense_weights and dense_weights must have the same length, "
+        "got ",
+        dense_weights_outputs.size(), " and ", dense_weights_inputs.size());
 
   for (int i = 0; i < sparse_weights_inputs.size(); ++i) {
     Tensor* delta_t;
@@ -250,7 +269,7 @@ Status Examples::SampleAdaptiveProbabilities(
                                                 num_weight_vectors);
     const double kappa = example_state_data(example_id, 0) +
                          loss_updater->PrimalLossDerivative(
-                             example_statistics.wx[0], label, example_weight);
+                             example_statistics.wx[0], label, 1.0);
     probabilities_[example_id] = example_weight *
                                  sqrt(examples_[example_id].squared_norm_ +
                                       regularization.symmetric_l2() *
@@ -305,7 +324,10 @@ Status Examples::SampleAdaptiveProbabilities(
 
 void Examples::RandomShuffle() {
   std::iota(sampled_index_.begin(), sampled_index_.end(), 0);
-  std::random_shuffle(sampled_index_.begin(), sampled_index_.end());
+
+  std::random_device rd;
+  std::mt19937 rng(rd());
+  std::shuffle(sampled_index_.begin(), sampled_index_.end(), rng);
 }
 
 // TODO(sibyl-Aix6ihai): Refactor/shorten this function.
@@ -319,13 +341,28 @@ Status Examples::Initialize(OpKernelContext* const context,
   OpInputList sparse_example_indices_inputs;
   TF_RETURN_IF_ERROR(context->input_list("sparse_example_indices",
                                          &sparse_example_indices_inputs));
+  if (sparse_example_indices_inputs.size() != num_sparse_features)
+    return errors::InvalidArgument(
+        "Expected ", num_sparse_features,
+        " tensors in sparse_example_indices but got ",
+        sparse_example_indices_inputs.size());
   OpInputList sparse_feature_indices_inputs;
   TF_RETURN_IF_ERROR(context->input_list("sparse_feature_indices",
                                          &sparse_feature_indices_inputs));
+  if (sparse_feature_indices_inputs.size() != num_sparse_features)
+    return errors::InvalidArgument(
+        "Expected ", num_sparse_features,
+        " tensors in sparse_feature_indices but got ",
+        sparse_feature_indices_inputs.size());
   OpInputList sparse_feature_values_inputs;
   if (num_sparse_features_with_values > 0) {
     TF_RETURN_IF_ERROR(context->input_list("sparse_feature_values",
                                            &sparse_feature_values_inputs));
+    if (sparse_feature_values_inputs.size() != num_sparse_features_with_values)
+      return errors::InvalidArgument(
+          "Expected ", num_sparse_features_with_values,
+          " tensors in sparse_feature_values but got ",
+          sparse_feature_values_inputs.size());
   }
 
   const Tensor* example_weights_t;
@@ -392,6 +429,13 @@ Status Examples::CreateSparseFeatureRepresentation(
           sparse_example_indices_inputs[i].template flat<int64>();
       auto feature_indices =
           sparse_feature_indices_inputs[i].template flat<int64>();
+      if (example_indices.size() != feature_indices.size()) {
+        mutex_lock l(mu);
+        result = errors::InvalidArgument(
+            "Found mismatched example_indices and feature_indices [",
+            example_indices, "] vs [", feature_indices, "]");
+        return;
+      }
 
       // Parse features for each example. Features for a particular example
       // are at the offsets (start_id, end_id]

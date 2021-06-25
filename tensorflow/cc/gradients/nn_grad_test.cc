@@ -13,10 +13,13 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
+#include <string>
+
 #include "tensorflow/cc/framework/grad_op_registry.h"
 #include "tensorflow/cc/framework/gradient_checker.h"
 #include "tensorflow/cc/framework/testutil.h"
 #include "tensorflow/cc/gradients/grad_testutil.h"
+#include "tensorflow/cc/ops/nn_ops_internal.h"
 #include "tensorflow/cc/ops/standard_ops.h"
 #include "tensorflow/core/framework/tensor_testutil.h"
 #include "tensorflow/core/lib/core/status_test_util.h"
@@ -25,19 +28,22 @@ limitations under the License.
 namespace tensorflow {
 namespace {
 
+using ops::AvgPool;
+using ops::AvgPool3D;
 using ops::BiasAdd;
 using ops::Conv2D;
+using ops::Conv2DBackpropInput;
+using ops::DepthwiseConv2dNative;
 using ops::Elu;
 using ops::FractionalAvgPool;
 using ops::FractionalMaxPool;
+using ops::FusedBatchNormV3;
 using ops::L2Loss;
 using ops::LogSoftmax;
 using ops::LRN;
-using ops::AvgPool;
-using ops::AvgPool3D;
 using ops::MaxPool;
-using ops::MaxPoolV2;
 using ops::MaxPool3D;
+using ops::MaxPoolV2;
 using ops::Placeholder;
 using ops::Relu;
 using ops::Relu6;
@@ -111,6 +117,20 @@ TEST_F(NNGradTest, SoftmaxGrad) {
   RunTest(x, shape, y, shape);
 }
 
+TEST_F(NNGradTest, SoftmaxCrossEntropyWithLogitsGrad) {
+  TensorShape logits_shape({5, 3});
+  TensorShape loss_shape({5});
+
+  auto logits = Placeholder(scope_, DT_FLOAT, Placeholder::Shape(logits_shape));
+  auto labels = Placeholder(scope_, DT_FLOAT, Placeholder::Shape(logits_shape));
+  auto y =
+      tensorflow::ops::SoftmaxCrossEntropyWithLogits(scope_, logits, labels);
+  // Note the reversal of the backprop and loss orders. Issue #18734 has been
+  // opened for this.
+  RunTest({logits, labels}, {logits_shape, logits_shape}, {y.backprop, y.loss},
+          {logits_shape, loss_shape});
+}
+
 TEST_F(NNGradTest, LogSoftmaxGrad) {
   TensorShape shape({5, 3});
   auto x = Placeholder(scope_, DT_FLOAT, Placeholder::Shape(shape));
@@ -143,6 +163,32 @@ TEST_F(NNGradTest, Relu6Grad) {
   Tensor x_init_value = test::AsTensor<float>(
       {-0.9f, -0.7f, -0.5f, -0.3f, -0.1f, 6.1f, 6.3f, 6.5f, 6.7f, 6.9f},
       {5, 2});
+  RunTest(x, x_init_value, y, shape);
+}
+
+TEST_F(NNGradTest, LeakyReluGrad) {
+  TensorShape shape({5, 2});
+  auto x = Placeholder(scope_, DT_FLOAT, Placeholder::Shape(shape));
+  auto y = ops::internal::LeakyRelu(scope_, x);
+  // Avoid input values where Leaky ReLU gradient is not well defined (around
+  // zero).
+  Tensor x_init_value = test::AsTensor<float>(
+      {-0.9f, -0.7f, -0.5f, -0.3f, -0.1f, 0.1f, 0.3f, 0.5f, 0.7f, 0.9f},
+      {5, 2});
+  RunTest(x, x_init_value, y, shape);
+}
+
+TEST_F(NNGradTest, LeakyReluGradGrad) {
+  TensorShape shape({5, 2});
+  auto x = Placeholder(scope_, DT_FLOAT, Placeholder::Shape(shape));
+  // Avoid input values where Leaky ReLU gradient is not well defined (around
+  // zero).
+  Tensor x_init_value = test::AsTensor<float>(
+      {2.3f, 1.9f, 1.5f, 1.1f, 0.7f, 0.3f, -0.1f, -0.5f, -0.9f, -1.3f}, {5, 2});
+  Tensor features = test::AsTensor<float>(
+      {-0.9f, -0.7f, -0.5f, -0.3f, -0.1f, 0.1f, 0.3f, 0.5f, 0.7f, 0.9f},
+      {5, 2});
+  auto y = ops::internal::LeakyReluGrad(scope_, x, features);
   RunTest(x, x_init_value, y, shape);
 }
 
@@ -253,7 +299,7 @@ TEST_F(NNGradTest, AvgPool3DGradHelper) {
   RunTest(x, x_shape, y, y_shape);
 }
 
-TEST_F(NNGradTest, LRN){
+TEST_F(NNGradTest, LRN) {
   TensorShape x_shape({1, 1, 2, 1});
   auto x = Placeholder(scope_, DT_FLOAT, Placeholder::Shape(x_shape));
   auto y = LRN(scope_, x);
@@ -298,6 +344,61 @@ TEST_F(NNGradTest, FractionalMaxPoolGradHelper) {
   SetRandomValuesForMaxPooling<float>(&x_init_value);
   TensorShape y_shape({1, 2, 3, 1});
   RunTest(x, x_init_value, y.output, y_shape);
+}
+
+class FusedBatchNormGradTest : public NNGradTest,
+                               public ::testing::WithParamInterface<
+                                   std::tuple<bool, bool, TensorShape>> {};
+
+TEST_P(FusedBatchNormGradTest, FusedBatchNormV3Grad) {
+  FusedBatchNormV3::Attrs attrs;
+  attrs.is_training_ = std::get<0>(GetParam());
+  bool channel_first = std::get<1>(GetParam());
+  TensorShape shape = std::get<2>(GetParam());
+  int channel_dim = (channel_first) ? 1 : shape.dims() - 1;
+  TensorShape scale_shape({shape.dim_size(channel_dim)});
+  auto x = Placeholder(scope_, DT_FLOAT, Placeholder::Shape(shape));
+  auto scale = Placeholder(scope_, DT_FLOAT, Placeholder::Shape(scale_shape));
+  auto offset = Placeholder(scope_, DT_FLOAT, Placeholder::Shape(scale_shape));
+  auto mean = ops::ZerosLike(scope_, scale);
+  auto var = ops::OnesLike(scope_, scale);
+
+  if (!channel_first) {
+    attrs.data_format_ = (shape.dims() == 5) ? "NDHWC" : "NHWC";
+  } else {
+    attrs.data_format_ = (shape.dims() == 5) ? "NCDHW" : "NCHW";
+  }
+
+  auto y = FusedBatchNormV3(scope_, x, scale, offset, mean, var, attrs);
+  RunTest({x, scale, offset}, {shape, scale_shape, scale_shape}, {y.y},
+          {shape});
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    FusedBatchNormGrad, FusedBatchNormGradTest,
+    ::testing::Combine(::testing::Bool(), ::testing::Bool(),
+                       ::testing::Values(TensorShape({2, 3, 4, 5}),
+                                         TensorShape({2, 3, 2, 2, 2}))));
+
+TEST_F(NNGradTest, Conv2DBackpropInputGrad) {
+  TensorShape shape({1, 2, 2, 1});
+  TensorShape filter_shape({1, 1, 1, 1});
+  auto out = Placeholder(scope_, DT_FLOAT, Placeholder::Shape(shape));
+  auto filter = Placeholder(scope_, DT_FLOAT, Placeholder::Shape(filter_shape));
+  const std::vector<int> strides{1, 1, 1, 1};
+  auto y = Conv2DBackpropInput(scope_, ops::Shape(scope_, out), filter, out,
+                               strides, "SAME");
+  RunTest({out, filter}, {shape, filter_shape}, {y}, {shape});
+}
+
+TEST_F(NNGradTest, DepthwiseConv2dNativeGrad) {
+  TensorShape shape({1, 2, 2, 1});
+  TensorShape filter_shape({1, 1, 1, 1});
+  auto x = Placeholder(scope_, DT_FLOAT, Placeholder::Shape(shape));
+  auto filter = Placeholder(scope_, DT_FLOAT, Placeholder::Shape(filter_shape));
+  const std::vector<int> strides{1, 1, 1, 1};
+  auto y = DepthwiseConv2dNative(scope_, x, filter, strides, "SAME");
+  RunTest({x, filter}, {shape, filter_shape}, {y}, {shape});
 }
 
 }  // namespace

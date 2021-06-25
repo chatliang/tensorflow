@@ -17,18 +17,16 @@ limitations under the License.
 
 #include <string>
 
-#include "tensorflow/compiler/xla/client/xla_client/xla_builder.h"
-#include "tensorflow/compiler/xla/client/xla_client/xla_computation.h"
+#include "absl/strings/str_cat.h"
+#include "tensorflow/compiler/xla/client/lib/constants.h"
+#include "tensorflow/compiler/xla/client/xla_builder.h"
+#include "tensorflow/compiler/xla/client/xla_computation.h"
 #include "tensorflow/compiler/xla/shape_util.h"
 #include "tensorflow/compiler/xla/status_macros.h"
 #include "tensorflow/compiler/xla/types.h"
 #include "tensorflow/compiler/xla/xla_data.pb.h"
-#include "tensorflow/core/lib/strings/strcat.h"
 
 namespace xla {
-namespace {
-
-using XlaOpGenerator = XlaOp (*)(XlaBuilder*, const XlaOp&, const XlaOp&);
 
 XlaComputation CreateScalarComputation(const string& name, PrimitiveType type,
                                        XlaBuilder* builder,
@@ -38,171 +36,204 @@ XlaComputation CreateScalarComputation(const string& name, PrimitiveType type,
     b = builder->CreateSubBuilder(name);
   } else {
     b = builder->CreateSubBuilder(
-        tensorflow::strings::StrCat(name, "_", PrimitiveType_Name(type)));
+        absl::StrCat(name, "_", PrimitiveType_Name(type)));
   }
 
   const Shape scalar = ShapeUtil::MakeShape(type, {});
-  auto lhs = b->Parameter(0, scalar, "lhs");
-  auto rhs = b->Parameter(1, scalar, "rhs");
-  generator(b.get(), lhs, rhs);
+  auto lhs = Parameter(b.get(), 0, scalar, "lhs");
+  auto rhs = Parameter(b.get(), 1, scalar, "rhs");
+  generator(lhs, rhs);
   return b->BuildAndNoteError();
 }
-
-}  // namespace
 
 XlaComputation CreateScalarAddComputation(PrimitiveType type,
                                           XlaBuilder* builder) {
   return CreateScalarComputation(
-      "add", type, builder,
-      [](XlaBuilder* b, const XlaOp& lhs, const XlaOp& rhs) {
-        return b->Add(lhs, rhs);
-      });
+      "add", type, builder, [](XlaOp lhs, XlaOp rhs) { return Add(lhs, rhs); });
 }
 
 XlaComputation CreateScalarMultiplyComputation(PrimitiveType type,
                                                XlaBuilder* builder) {
   return CreateScalarComputation(
-      "mul", type, builder,
-      [](XlaBuilder* b, const XlaOp& lhs, const XlaOp& rhs) {
-        return b->Mul(lhs, rhs);
-      });
+      "mul", type, builder, [](XlaOp lhs, XlaOp rhs) { return Mul(lhs, rhs); });
 }
 
 XlaComputation CreateScalarGeComputation(PrimitiveType type,
                                          XlaBuilder* builder) {
   return CreateScalarComputation(
-      "ge", type, builder,
-      [](XlaBuilder* b, const XlaOp& lhs, const XlaOp& rhs) {
-        return b->Ge(lhs, rhs);
-      });
+      "ge", type, builder, [](XlaOp lhs, XlaOp rhs) { return Ge(lhs, rhs); });
 }
 
 XlaComputation CreateScalarMaxComputation(PrimitiveType type,
                                           XlaBuilder* builder) {
   return CreateScalarComputation(
-      "max", type, builder,
-      [](XlaBuilder* b, const XlaOp& lhs, const XlaOp& rhs) {
-        return b->Max(lhs, rhs);
-      });
+      "max", type, builder, [](XlaOp lhs, XlaOp rhs) { return Max(lhs, rhs); });
 }
 
 XlaComputation CreateScalarMinComputation(PrimitiveType type,
                                           XlaBuilder* builder) {
   return CreateScalarComputation(
-      "min", type, builder,
-      [](XlaBuilder* b, const XlaOp& lhs, const XlaOp& rhs) {
-        return b->Min(lhs, rhs);
-      });
+      "min", type, builder, [](XlaOp lhs, XlaOp rhs) { return Min(lhs, rhs); });
 }
 
-XlaComputation CreateScalarAndComputation(XlaBuilder* builder) {
+XlaComputation CreateScalarAndComputation(PrimitiveType type,
+                                          XlaBuilder* builder) {
   return CreateScalarComputation(
-      "and", PRED, builder,
-      [](XlaBuilder* b, const XlaOp& lhs, const XlaOp& rhs) {
-        return b->And(lhs, rhs);
-      });
+      "and", type, builder, [](XlaOp lhs, XlaOp rhs) { return And(lhs, rhs); });
 }
 
-XlaComputation CreateScalarOrComputation(XlaBuilder* builder) {
+XlaComputation CreateScalarOrComputation(PrimitiveType type,
+                                         XlaBuilder* builder) {
   return CreateScalarComputation(
-      "or", PRED, builder,
-      [](XlaBuilder* b, const XlaOp& lhs, const XlaOp& rhs) {
-        return b->Or(lhs, rhs);
-      });
+      "or", type, builder, [](XlaOp lhs, XlaOp rhs) { return Or(lhs, rhs); });
 }
 
-StatusOr<XlaOp> Any(const XlaOp& predicates, XlaBuilder* builder) {
-  auto f = builder->ConstantR0<bool>(false);
-  XlaComputation logical_or = CreateScalarOrComputation(builder);
-  TF_ASSIGN_OR_RETURN(const Shape& predicates_shape,
-                      builder->GetShape(predicates));
-  std::vector<int64> all_dimensions(ShapeUtil::Rank(predicates_shape));
-  std::iota(all_dimensions.begin(), all_dimensions.end(), 0);
-  return builder->Reduce(predicates, f, logical_or, all_dimensions);
+XlaComputation CreateScalarIdentityWithZeroComputation(PrimitiveType type,
+                                                       XlaBuilder* builder) {
+  XlaComputation reducer =
+      (primitive_util::IsIntegralType(type) || type == PRED)
+          ? CreateScalarOrComputation(type, builder)
+          : CreateScalarAddComputation(type, builder);
+  return reducer;
+}
+
+XlaOp Any(XlaOp predicates) {
+  XlaBuilder* builder = predicates.builder();
+  return builder->ReportErrorOrReturn([&]() -> StatusOr<XlaOp> {
+    auto f = ConstantR0<bool>(builder, false);
+    XlaComputation logical_or = CreateScalarOrComputation(PRED, builder);
+    TF_ASSIGN_OR_RETURN(const Shape& predicates_shape,
+                        builder->GetShape(predicates));
+    std::vector<int64> all_dimensions(predicates_shape.rank());
+    std::iota(all_dimensions.begin(), all_dimensions.end(), 0);
+    return Reduce(predicates, f, logical_or, all_dimensions);
+  });
 }
 
 namespace {
-xla::XlaOp FloatLiteral(xla::XlaBuilder* b, PrimitiveType data_type,
-                        float value) {
-  return b->ConvertElementType(b->ConstantR0(value), data_type);
+
+XlaComputation CreateMinMaxComputation(XlaBuilder* outer_builder,
+                                       PrimitiveType value_type,
+                                       PrimitiveType index_type, bool is_min,
+                                       bool stable, bool tie_low) {
+  auto sub_builder = outer_builder->CreateSubBuilder("minmax_func");
+  XlaBuilder* b = sub_builder.get();
+  XlaOp lhs_value =
+      Parameter(b, 0, ShapeUtil::MakeShape(value_type, {}), "lhs_value");
+  XlaOp lhs_index =
+      Parameter(b, 1, ShapeUtil::MakeShape(index_type, {}), "lhs_index");
+  XlaOp rhs_value =
+      Parameter(b, 2, ShapeUtil::MakeShape(value_type, {}), "rhs_value");
+  XlaOp rhs_index =
+      Parameter(b, 3, ShapeUtil::MakeShape(index_type, {}), "rhs_index");
+
+  XlaOp cmp = is_min ? Le(lhs_value, rhs_value) : Ge(lhs_value, rhs_value);
+  XlaOp max = Select(cmp, lhs_value, rhs_value);
+  XlaOp arg_max = Select(cmp, lhs_index, rhs_index);
+  if (stable) {
+    XlaOp eq = Eq(lhs_value, rhs_value);
+    XlaOp tie_id =
+        tie_low ? Min(lhs_index, rhs_index) : Max(lhs_index, rhs_index);
+    arg_max = Select(eq, tie_id, arg_max);
+  }
+  Tuple(b, {max, arg_max});
+  return b->BuildAndNoteError();
 }
 
-// Polynomials for computing erf/erfc.  Originally from cephes.
-// Note we use float for compatibility across devices, at the cost of some
-// precision for 64 bit computations.
-//
-// Coefficients are in descending order.
-std::array<float, 9> kErfcPCoefficient = {
-    2.46196981473530512524E-10, 5.64189564831068821977E-1,
-    7.46321056442269912687E0,   4.86371970985681366614E1,
-    1.96520832956077098242E2,   5.26445194995477358631E2,
-    9.34528527171957607540E2,   1.02755188689515710272E3,
-    5.57535335369399327526E2};
-std::array<float, 9> kErfcQCoefficient = {
-    1.00000000000000000000E0, 1.32281951154744992508E1,
-    8.67072140885989742329E1, 3.54937778887819891062E2,
-    9.75708501743205489753E2, 1.82390916687909736289E3,
-    2.24633760818710981792E3, 1.65666309194161350182E3,
-    5.57535340817727675546E2};
-std::array<float, 6> kErfcRCoefficient = {
-    5.64189583547755073984E-1, 1.27536670759978104416E0,
-    5.01905042251180477414E0,  6.16021097993053585195E0,
-    7.40974269950448939160E0,  2.97886665372100240670E0};
-std::array<float, 7> kErfcSCoefficient = {
-    1.00000000000000000000E0, 2.26052863220117276590E0,
-    9.39603524938001434673E0, 1.20489539808096656605E1,
-    1.70814450747565897222E1, 9.60896809063285878198E0,
-    3.36907645100081516050E0};
-std::array<float, 5> kErfTCoefficient = {
-    9.60497373987051638749E0, 9.00260197203842689217E1,
-    2.23200534594684319226E3, 7.00332514112805075473E3,
-    5.55923013010394962768E4};
-std::array<float, 6> kErfUCoefficient = {
-    1.00000000000000000000E0, 3.35617141647503099647E1,
-    5.21357949780152679795E2, 4.59432382970980127987E3,
-    2.26290000613890934246E4, 4.92673942608635921086E4};
+XlaOp ArgMinMax(XlaOp input, PrimitiveType output_type, int axis, bool is_min,
+                bool stable, bool tie_low) {
+  XlaBuilder* builder = input.builder();
+  return builder->ReportErrorOrReturn([&]() -> StatusOr<XlaOp> {
+    TF_ASSIGN_OR_RETURN(Shape input_shape, builder->GetShape(input));
+    XlaOp value_init_value;
+    if (is_min) {
+      value_init_value = MaxValue(builder, input_shape.element_type());
+    } else {
+      value_init_value = MinValue(builder, input_shape.element_type());
+    }
+    int64 dimension_size = input_shape.dimensions(axis);
+    auto index_type = dimension_size <= INT32_MAX ? S32 : output_type;
+    XlaOp index_init_value = Zero(builder, index_type);
+    auto iota_shape = input_shape;
+    iota_shape.set_element_type(index_type);
+    XlaOp iota = Iota(builder, iota_shape, axis);
+
+    XlaComputation reducer =
+        CreateMinMaxComputation(builder, input_shape.element_type(), index_type,
+                                is_min, stable, tie_low);
+    XlaOp max_argmax = Reduce(builder, {input, iota},
+                              {value_init_value, index_init_value}, reducer,
+                              /*dimensions_to_reduce=*/{axis});
+    XlaOp argmax = GetTupleElement(max_argmax, 1);
+    if (index_type != output_type) {
+      argmax = ConvertElementType(argmax, output_type);
+    }
+    return argmax;
+  });
+}
+
+XlaOp ArgMinMaxTwoPass(XlaOp input, PrimitiveType output_type, int axis,
+                       bool is_min, bool tie_low) {
+  XlaBuilder* builder = input.builder();
+  return builder->ReportErrorOrReturn([&]() -> StatusOr<XlaOp> {
+    TF_ASSIGN_OR_RETURN(Shape input_shape, builder->GetShape(input));
+    XlaOp init_value;
+    XlaComputation reducer;
+    if (is_min) {
+      init_value = MaxValue(builder, input_shape.element_type());
+      reducer = CreateScalarMinComputation(input_shape.element_type(), builder);
+    } else {
+      init_value = MinValue(builder, input_shape.element_type());
+      reducer = CreateScalarMaxComputation(input_shape.element_type(), builder);
+    }
+
+    XlaOp iota = Iota(
+        builder, ShapeUtil::ChangeElementType(input_shape, output_type), axis);
+    XlaOp reduced_input = Reduce(input, init_value, reducer,
+                                 /*dimensions_to_reduce=*/{axis});
+    std::vector<int64> broadcast_dims(input_shape.rank() - 1);
+    std::iota(broadcast_dims.begin(), broadcast_dims.begin() + axis, 0);
+    std::iota(broadcast_dims.begin() + axis, broadcast_dims.end(), axis + 1);
+    if (tie_low) {
+      XlaOp max_idx = MaxValue(builder, output_type);
+      XlaOp select_mask = Select(Eq(input, reduced_input, broadcast_dims),
+                                 /*on_true=*/iota,
+                                 /*on_false=*/
+                                 max_idx);
+      return Reduce(select_mask, max_idx,
+                    CreateScalarMinComputation(output_type, builder),
+                    /*dimensions_to_reduce=*/{axis});
+    } else {
+      XlaOp min_idx = MinValue(builder, output_type);
+      XlaOp select_mask = Select(Eq(input, reduced_input, broadcast_dims),
+                                 /*on_true=*/iota,
+                                 /*on_false=*/
+                                 min_idx);
+      return Reduce(select_mask, min_idx,
+                    CreateScalarMaxComputation(output_type, builder),
+                    /*dimensions_to_reduce=*/{axis});
+    }
+  });
+}
 }  // namespace
 
-// Evaluate the polynomial given coefficients and `x`.
-// N.B. Coefficients should be supplied in decreasing order.
-xla::XlaOp EvaluatePolynomial(xla::XlaBuilder* b, const xla::XlaOp& x,
-                              tensorflow::gtl::ArraySlice<float> coefficients,
-                              PrimitiveType data_type) {
-  xla::XlaOp poly = FloatLiteral(b, data_type, 0.0);
-  for (float c : coefficients) {
-    poly = b->Add(b->Mul(poly, x), FloatLiteral(b, data_type, c));
-  }
-  return poly;
+XlaOp ArgMax(XlaOp input, PrimitiveType output_type, int axis, bool stable,
+             bool tie_low) {
+  return ArgMinMax(input, output_type, axis, /*is_min=*/false, stable, tie_low);
 }
 
-// Compute an approximation of the error function complement (1 - erf(x)).
-xla::XlaOp ComputeErfc(xla::XlaBuilder* b, const xla::XlaOp& x,
-                       PrimitiveType data_type) {
-  xla::XlaOp zero = FloatLiteral(b, data_type, 0.0);
-  xla::XlaOp two = FloatLiteral(b, data_type, 2.0);
-  xla::XlaOp eight = FloatLiteral(b, data_type, 8.0);
-
-  xla::XlaOp abs_x = b->Abs(x);
-  xla::XlaOp z = b->Exp(b->Mul(b->Neg(x), x));
-
-  xla::XlaOp pp = EvaluatePolynomial(b, abs_x, kErfcPCoefficient, data_type);
-  xla::XlaOp pq = EvaluatePolynomial(b, abs_x, kErfcQCoefficient, data_type);
-  xla::XlaOp pr = EvaluatePolynomial(b, abs_x, kErfcRCoefficient, data_type);
-  xla::XlaOp ps = EvaluatePolynomial(b, abs_x, kErfcSCoefficient, data_type);
-
-  xla::XlaOp y = b->Select(b->Lt(abs_x, eight), b->Div(b->Mul(z, pp), pq),
-                           b->Div(b->Mul(z, pr), ps));
-
-  return b->Select(b->Lt(x, zero), b->Sub(two, y), y);
+XlaOp ArgMin(XlaOp input, PrimitiveType output_type, int axis, bool stable,
+             bool tie_low) {
+  return ArgMinMax(input, output_type, axis, /*is_min=*/true, stable, tie_low);
 }
 
-// Compute a polynomial approximation of the error function.
-xla::XlaOp ComputeErf(xla::XlaBuilder* b, const xla::XlaOp& x,
-                      PrimitiveType data_type) {
-  xla::XlaOp z = b->Mul(x, x);
-  xla::XlaOp pt = EvaluatePolynomial(b, z, kErfTCoefficient, data_type);
-  xla::XlaOp pu = EvaluatePolynomial(b, z, kErfUCoefficient, data_type);
-  return b->Div(b->Mul(x, pt), pu);
+XlaOp ArgMaxTwoPass(XlaOp input, PrimitiveType output_type, int axis,
+                    bool tie_low) {
+  return ArgMinMaxTwoPass(input, output_type, axis, /*is_min=*/false, tie_low);
 }
 
+XlaOp ArgMinTwoPass(XlaOp input, PrimitiveType output_type, int axis,
+                    bool tie_low) {
+  return ArgMinMaxTwoPass(input, output_type, axis, /*is_min=*/true, tie_low);
+}
 }  // namespace xla

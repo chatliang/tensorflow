@@ -17,7 +17,6 @@ limitations under the License.
 
 // Place `<locale>` before <Python.h> to avoid build failure in macOS.
 #include <locale>
-#include <Python.h>
 
 #include "tensorflow/core/lib/core/errors.h"
 #include "tensorflow/core/lib/strings/strcat.h"

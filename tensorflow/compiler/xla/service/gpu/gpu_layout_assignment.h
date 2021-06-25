@@ -17,6 +17,7 @@ limitations under the License.
 #define TENSORFLOW_COMPILER_XLA_SERVICE_GPU_GPU_LAYOUT_ASSIGNMENT_H_
 
 #include "tensorflow/compiler/xla/service/computation_layout.h"
+#include "tensorflow/compiler/xla/service/hlo_instructions.h"
 #include "tensorflow/compiler/xla/service/layout_assignment.h"
 #include "tensorflow/core/lib/core/status.h"
 #include "tensorflow/core/platform/stream_executor_no_cuda.h"
@@ -28,9 +29,15 @@ namespace gpu {
 // layout constraints for operands and results of library calls.
 class GpuLayoutAssignment : public LayoutAssignment {
  public:
-  explicit GpuLayoutAssignment(ComputationLayout* entry_computation_layout,
-                               se::StreamExecutor* stream_executor)
-      : LayoutAssignment(entry_computation_layout),
+  explicit GpuLayoutAssignment(
+      ComputationLayout* entry_computation_layout,
+      std::function<bool(const HloInstruction*)>
+          instruction_can_change_layout_func,
+      se::StreamExecutor* stream_executor,
+      ChannelLayoutConstraints* channel_constraints = nullptr)
+      : LayoutAssignment(entry_computation_layout,
+                         std::move(instruction_can_change_layout_func),
+                         channel_constraints),
         stream_executor_(stream_executor) {}
   ~GpuLayoutAssignment() override {}
 
@@ -42,12 +49,10 @@ class GpuLayoutAssignment : public LayoutAssignment {
   Status PropagateBufferConstraint(
       const BufferLayoutConstraint& buffer_constraint,
       LayoutConstraints* constraints) override;
-  bool CustomCallRequiresMajorFirstLayout(
-      const HloInstruction* instruction) override;
 
  private:
   Status AddBackendConstraintsToDnnConvCustomCall(
-      HloInstruction* instr, LayoutConstraints* constraints);
+      HloCustomCallInstruction* instr, LayoutConstraints* constraints);
 
   se::StreamExecutor* stream_executor_;
 };

@@ -38,9 +38,16 @@ class RpcCollectiveExecutorMgr : public CollectiveExecutorMgr {
       const ConfigProto& config, const DeviceMgr* dev_mgr,
       std::unique_ptr<DeviceResolverDistributed> dev_resolver,
       std::unique_ptr<CollectiveParamResolverDistributed> param_resolver,
+      std::unique_ptr<NcclCommunicatorInterface> nccl_communicator,
       WorkerCacheInterface* worker_cache, const string& task_name);
 
   virtual ~RpcCollectiveExecutorMgr();
+
+  // This function should only be called at the group_leader, by an RPC.
+  // Other needs for StepIds should be satisfied by NextStepId.
+  void GetStepSequenceAsync(const GetStepSequenceRequest* request,
+                            GetStepSequenceResponse* response,
+                            const StatusCallback& done) override;
 
   void RefreshStepIdSequenceAsync(int64 graph_key,
                                   const StatusCallback& done) override;
@@ -50,7 +57,7 @@ class RpcCollectiveExecutorMgr : public CollectiveExecutorMgr {
   void RetireStepId(int64 graph_key, int64 step_id) override;
 
  protected:
-  CollectiveExecutor* Create(int64 step_id) override;
+  virtual CollectiveExecutor* Create(int64 step_id) override;
 
   WorkerCacheInterface* const worker_cache_;  // Not owned.
   const string task_name_;
@@ -72,8 +79,16 @@ class RpcCollectiveExecutorMgr : public CollectiveExecutorMgr {
 
   mutex sequence_mu_;
   gtl::FlatMap<int64, GraphKeySequence*> sequence_table_
-      GUARDED_BY(sequence_mu_);
+      TF_GUARDED_BY(sequence_mu_);
 };
+
+// Creates a distributed CollectiveExecutorMgr with production implementations
+// of each components. Cases that need to inject other implementations of these
+// components should call CollectiveExecutorMgr constructor directly.
+std::unique_ptr<RpcCollectiveExecutorMgr> CreateProdRpcCollectiveExecutorMgr(
+    const ConfigProto& config, const DeviceMgr* device_mgr,
+    std::unique_ptr<NcclCommunicatorInterface> nccl_communicator,
+    WorkerCacheInterface* worker_cache, const string& default_worker_name);
 
 }  // namespace tensorflow
 #endif  // TENSORFLOW_CORE_DISTRIBUTED_RUNTIME_RPC_COLLECTIVE_EXECUTOR_MGR_H_

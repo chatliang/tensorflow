@@ -18,6 +18,7 @@ limitations under the License.
 #include <numeric>
 #include <vector>
 #include "tensorflow/core/framework/attr_value.pb.h"
+#include "tensorflow/core/framework/tensor.pb.h"
 #include "tensorflow/core/lib/core/status_test_util.h"
 #include "tensorflow/core/platform/protobuf.h"
 #include "tensorflow/core/platform/test.h"
@@ -159,12 +160,12 @@ TEST(AttrValueUtil, SummarizeAttrValueDoesNotElideShortLists) {
 }
 
 TEST(AttrValueUtil, SummarizeAttrValueElidesLongLists) {
-  std::vector<int> alist(30);
+  std::vector<int> alist(60);
   std::iota(alist.begin(), alist.end(), 0);
 
   AttrValue attr_value;
   SetAttrValue(alist, &attr_value);
-  EXPECT_EQ("[0, 1, 2, 3, 4, ..., 25, 26, 27, 28, 29]",
+  EXPECT_EQ("[0, 1, 2, 3, 4, ..., 55, 56, 57, 58, 59]",
             SummarizeAttrValue(attr_value));
 }
 
@@ -223,6 +224,29 @@ TEST(AttrValueEquality, StringAndFuncTensors) {
   c2 = c1;
   c2.mutable_func()->mutable_attr()->erase("attr2");
   ExpectDifferent(c1, c2);
+}
+
+TEST(AttrValueEquality, GiantTensors) {
+  AttrValue tensor = FromText(R"(
+      tensor {
+        dtype: DT_INT32
+        tensor_shape {
+          dim {
+            size: 1024
+          }
+          dim {
+            size: 1024
+          }
+          dim {
+            size: 1024
+          }
+          dim {
+            size: 1024
+          }
+        }
+        int_val: 0
+      })");
+  EXPECT_TRUE(AreAttrValuesEqual(tensor, tensor));
 }
 
 }  // namespace tensorflow

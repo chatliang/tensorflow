@@ -35,10 +35,17 @@ Compiler::ComputeBackendConfigs(const HloInstruction& hlo,
   return {};
 }
 
+std::unique_ptr<tensorflow::protobuf::Message>
+Compiler::ComputeDefaultBackendConfig(const HloInstruction& hlo,
+                                      se::StreamExecutor* executor) const {
+  CHECK(executor != nullptr);
+  return nullptr;
+}
+
 // Define a default version where metadata is not used.
 StatusOr<std::vector<std::unique_ptr<AotCompilationResult>>>
 Compiler::CompileAheadOfTime(
-    std::vector<std::unique_ptr<HloModule>> modules,
+    std::unique_ptr<HloModuleGroup> module_group,
     const AotCompilationOptions& options,
     std::unique_ptr<AotCompilationMetadata>* metadata) {
   if (metadata != nullptr) {
@@ -46,7 +53,7 @@ Compiler::CompileAheadOfTime(
         "Populating AotCompilationMetadata is not implemented on this "
         "compiler.");
   }
-  return CompileAheadOfTime(std::move(modules), options);
+  return CompileAheadOfTime(std::move(module_group), options);
 }
 
 /* static */ std::map<se::Platform::Id, Compiler::CompilerFactory>*
@@ -91,10 +98,21 @@ Compiler::GetPlatformCompilers() {
   auto* factories = GetPlatformCompilerFactories();
   auto it = factories->find(platform->id());
   if (it == factories->end()) {
+    string hint;
+    if (platform->Name() == "Host") {
+      hint =
+          " (hint: try adding tensorflow/compiler/jit:xla_cpu_jit as a "
+          "dependency)";
+    } else if (platform->Name() == "CUDA") {
+      hint =
+          " (hint: try adding tensorflow/compiler/jit:xla_gpu_jit as a "
+          "dependency)";
+    }
+
     return NotFound(
         "could not find registered compiler for platform %s -- check "
-        "target linkage",
-        platform->Name().c_str());
+        "target linkage%s",
+        platform->Name(), hint);
   }
 
   // And then we invoke the factory, placing the result into the mapping.
@@ -103,6 +121,6 @@ Compiler::GetPlatformCompilers() {
 }
 
 AotCompilationOptions::AotCompilationOptions()
-    : debug_options_(legacy_flags::GetDebugOptionsFromFlags()) {}
+    : debug_options_(GetDebugOptionsFromFlags()) {}
 
 }  // namespace xla

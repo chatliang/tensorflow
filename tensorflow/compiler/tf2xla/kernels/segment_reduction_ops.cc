@@ -14,19 +14,29 @@ limitations under the License.
 ==============================================================================*/
 
 #include "tensorflow/compiler/tf2xla/lib/scatter.h"
+#include "tensorflow/compiler/tf2xla/type_util.h"
 #include "tensorflow/compiler/tf2xla/xla_helpers.h"
 #include "tensorflow/compiler/tf2xla/xla_op_kernel.h"
 #include "tensorflow/compiler/tf2xla/xla_op_registry.h"
-#include "tensorflow/compiler/xla/client/xla_client/xla_builder.h"
+#include "tensorflow/compiler/xla/client/lib/constants.h"
+#include "tensorflow/compiler/xla/client/xla_builder.h"
 
 namespace tensorflow {
 namespace {
 
-class UnsortedSegmentSum : public XlaOpKernel {
+class UnsortedSegmentReduce : public XlaOpKernel {
  public:
-  explicit UnsortedSegmentSum(OpKernelConstruction* ctx) : XlaOpKernel(ctx) {
-    OP_REQUIRES_OK(ctx, ctx->GetAttr("T", &dtype_));
+  explicit UnsortedSegmentReduce(OpKernelConstruction* ctx) : XlaOpKernel(ctx) {
+    DataType dtype;
+    OP_REQUIRES_OK(ctx, ctx->GetAttr("T", &dtype));
+    OP_REQUIRES_OK(ctx, DataTypeToPrimitiveType(dtype, &type_));
   }
+
+  // The initial value to initialize elements of the output to.
+  virtual xla::XlaOp InitialValue(xla::XlaBuilder* builder) = 0;
+
+  // A function to combine two scalars with the same index (e.g., sum).
+  virtual xla::XlaOp Combine(xla::XlaOp a, xla::XlaOp b) = 0;
 
   void Compile(XlaOpKernelContext* ctx) override {
     // output = unsorted_segment_sum(data, indices, num_segments)
@@ -50,28 +60,60 @@ class UnsortedSegmentSum : public XlaOpKernel {
     OP_REQUIRES_OK(ctx, ctx->ConstantInputAsIntScalar(2, &num_segments));
 
     OP_REQUIRES(ctx, data_shape.dims() >= indices_shape.dims(),
-                errors::InvalidArgument(
-                    "UnsortedSegmentSum requires that indices' rank be"
-                    " less than or equal to data's rank."));
+                errors::InvalidArgument(type_string(),
+                                        " requires that indices' rank be"
+                                        " less than or equal to data's rank."));
     // Validate that indices.shape is a prefix of data.shape.
     for (int d = 0; d < indices_shape.dims(); ++d) {
-      OP_REQUIRES(ctx, (data_shape.dim_size(d) == indices_shape.dim_size(d)),
-                  errors::InvalidArgument(
-                      "UnsortedSegmentSum requires indices shape to be prefix"
-                      " of data_shape, but dimension ",
-                      d, " differs ", data_shape.dim_size(d), " vs. ",
-                      indices_shape.dim_size(d)));
+      OP_REQUIRES(
+          ctx, (data_shape.dim_size(d) == indices_shape.dim_size(d)),
+          errors::InvalidArgument(type_string(),
+                                  " requires indices shape to be prefix"
+                                  " of data_shape, but dimension ",
+                                  d, " differs ", data_shape.dim_size(d),
+                                  " vs. ", indices_shape.dim_size(d)));
     }
     xla::XlaBuilder* builder = ctx->builder();
+    // data shape = [indices_shape, segment_shape]
+    // buffer shape = [num_segment, segment_shape]
+    // We now create the buffer shape by reverse enginerring data shape into
+    // indices shape and segment shape.
     TensorShape buffer_shape = data_shape;
     buffer_shape.RemoveDimRange(0, indices_shape.dims());
     buffer_shape.InsertDim(0, num_segments);
-    auto buffer = builder->Broadcast(XlaHelpers::Zero(builder, dtype_),
-                                     buffer_shape.dim_sizes());
 
-    auto combiner = [](xla::XlaOp a, xla::XlaOp b, xla::XlaBuilder* builder) {
-      return builder->Add(a, b);
-    };
+    auto buffer =
+        xla::Broadcast(InitialValue(builder), buffer_shape.dim_sizes());
+
+    // Build dynamic dim sizes for buffer, as well as whether each dimension
+    // size is dynamic or static. We build two parts: num_sgement part and
+    // segment_shape part.
+    std::vector<xla::XlaOp> buffer_dims;
+    std::vector<bool> buffer_dims_are_dynamic;
+    // Build the "num_segment" part.
+    bool num_segments_is_dynamic;
+    OP_REQUIRES_OK(
+        ctx, ctx->ResolveInputDynamismIntoPred(2, &num_segments_is_dynamic));
+
+    buffer_dims.insert(buffer_dims.begin(), ctx->Input(2));
+    buffer_dims_are_dynamic.insert(buffer_dims_are_dynamic.begin(),
+                                   num_segments_is_dynamic);
+    // Build the segment shape part.
+    for (int64 i = indices_shape.dims(); i < data_shape.dims(); ++i) {
+      buffer_dims.push_back(xla::GetDimensionSize(data, i));
+      buffer_dims_are_dynamic.push_back(
+          ctx->InputXlaShape(0)->is_dynamic_dimension(i));
+    }
+
+    for (int64 i = 0; i < buffer_dims.size(); ++i) {
+      if (buffer_dims_are_dynamic[i]) {
+        // For each dynamic dimension, call set-dimension-size on it.
+        buffer = xla::SetDimensionSize(buffer, buffer_dims[i], i);
+      }
+    }
+
+    auto combiner = [this](xla::XlaOp a, xla::XlaOp b,
+                           xla::XlaBuilder* builder) { return Combine(a, b); };
 
     auto result = XlaScatter(buffer, /*updates=*/data, indices,
                              /*indices_are_vectors=*/false, combiner, builder);
@@ -79,13 +121,73 @@ class UnsortedSegmentSum : public XlaOpKernel {
     ctx->SetOutput(0, result.ValueOrDie());
   }
 
- private:
-  DataType dtype_;
+ protected:
+  xla::PrimitiveType type_;
+};
+
+class UnsortedSegmentSum : public UnsortedSegmentReduce {
+ public:
+  explicit UnsortedSegmentSum(OpKernelConstruction* ctx)
+      : UnsortedSegmentReduce(ctx) {}
+
+  xla::XlaOp InitialValue(xla::XlaBuilder* builder) override {
+    return xla::Zero(builder, type_);
+  };
+  xla::XlaOp Combine(xla::XlaOp a, xla::XlaOp b) override { return a + b; };
 };
 
 REGISTER_XLA_OP(
-    Name("UnsortedSegmentSum").CompileTimeConstInput("num_segments"),
+    Name("UnsortedSegmentSum").CompileTimeConstantInput("num_segments"),
     UnsortedSegmentSum);
+
+class UnsortedSegmentProd : public UnsortedSegmentReduce {
+ public:
+  explicit UnsortedSegmentProd(OpKernelConstruction* ctx)
+      : UnsortedSegmentReduce(ctx) {}
+
+  xla::XlaOp InitialValue(xla::XlaBuilder* builder) override {
+    return xla::One(builder, type_);
+  };
+  xla::XlaOp Combine(xla::XlaOp a, xla::XlaOp b) override { return a * b; };
+};
+
+REGISTER_XLA_OP(
+    Name("UnsortedSegmentProd").CompileTimeConstantInput("num_segments"),
+    UnsortedSegmentProd);
+
+class UnsortedSegmentMin : public UnsortedSegmentReduce {
+ public:
+  explicit UnsortedSegmentMin(OpKernelConstruction* ctx)
+      : UnsortedSegmentReduce(ctx) {}
+
+  xla::XlaOp InitialValue(xla::XlaBuilder* builder) override {
+    return xla::MaxFiniteValue(builder, type_);
+  };
+  xla::XlaOp Combine(xla::XlaOp a, xla::XlaOp b) override {
+    return xla::Min(a, b);
+  };
+};
+
+REGISTER_XLA_OP(
+    Name("UnsortedSegmentMin").CompileTimeConstantInput("num_segments"),
+    UnsortedSegmentMin);
+
+class UnsortedSegmentMax : public UnsortedSegmentReduce {
+ public:
+  explicit UnsortedSegmentMax(OpKernelConstruction* ctx)
+      : UnsortedSegmentReduce(ctx) {}
+
+  xla::XlaOp InitialValue(xla::XlaBuilder* builder) override {
+    return xla::MinFiniteValue(builder, type_);
+  };
+  xla::XlaOp Combine(xla::XlaOp a, xla::XlaOp b) override {
+    return xla::Max(a, b);
+  };
+};
+
+REGISTER_XLA_OP(
+    Name("UnsortedSegmentMax").CompileTimeConstantInput("num_segments"),
+    UnsortedSegmentMax);
 
 }  // namespace
 }  // namespace tensorflow

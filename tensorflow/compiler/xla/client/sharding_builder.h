@@ -33,6 +33,9 @@ using TileAssignment = Array<int64>;
 // Creates a replicated sharding - replicate a tensor on every device.
 OpSharding Replicate();
 
+// Creates a manual sharding - the partitioner will not change the shape.
+OpSharding Manual();
+
 // Creates a sharding that assigns a tensor to just one device.
 OpSharding AssignDevice(int device);
 
@@ -56,4 +59,4 @@ OpSharding Tuple(const ShapeTree<OpSharding>& shardings);
 }  // namespace sharding_builder
 }  // namespace xla
 
-#endif
+#endif  // TENSORFLOW_COMPILER_XLA_CLIENT_SHARDING_BUILDER_H_

@@ -1,4 +1,4 @@
-/* Copyright 2015 The TensorFlow Authors. All Rights Reserved.
+/* Copyright 2021 The TensorFlow Authors. All Rights Reserved.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -13,19 +13,16 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-// IWYU pragma: private, include "third_party/tensorflow/stream_executor/stream_executor.h"
-
 #ifndef TENSORFLOW_STREAM_EXECUTOR_LIB_STATUSOR_H_
 #define TENSORFLOW_STREAM_EXECUTOR_LIB_STATUSOR_H_
 
-#include "tensorflow/compiler/xla/statusor.h"
+#include "tensorflow/core/platform/statusor.h"
+#include "tensorflow/stream_executor/lib/status.h"
 
 namespace stream_executor {
 namespace port {
 
-// Use XLA's StatusOr so we don't duplicate code.
-template <typename T>
-using StatusOr = ::xla::StatusOr<T>;
+using tensorflow::StatusOr;
 
 }  // namespace port
 }  // namespace stream_executor

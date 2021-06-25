@@ -43,7 +43,9 @@ class SingleMachine : public Cluster {
              const std::vector<std::pair<string, Tensor>>& feed,
              const std::vector<string>& fetch, RunMetadata* metadata) override;
 
-  Status EnablePeakMemoryStats(bool enable) override;
+  const DeviceSet* GetDeviceSet() const override { return device_set_.get(); }
+
+  Status EnablePeakMemoryStats() override;
 
   // It requires EnableAllocatorStats(true) be called before Provision().
   Status GetPeakMemoryUsage(
@@ -68,16 +70,17 @@ class SingleMachine : public Cluster {
   std::vector<QueueRunnerDef> queue_runner_defs_;
   string last_graph_id_;
   mutex last_graph_mu_;
-  const GraphDef* last_graph_ GUARDED_BY(last_graph_mu_) = nullptr;
+  const GraphDef* last_graph_ TF_GUARDED_BY(last_graph_mu_) = nullptr;
   std::vector<string> init_ops_;
   int64 expected_init_time_s_;
   std::unique_ptr<Coordinator> coordinator_;
   std::unique_ptr<thread::ThreadPool> thread_pool_;
+  std::unique_ptr<DeviceSet> device_set_;
 
   RunMetadata init_metadata_;
 
   mutex close_mu_;
-  bool closing_ GUARDED_BY(close_mu_);
+  bool closing_ TF_GUARDED_BY(close_mu_);
 
   bool cpu_allocator_stats_enabled_ = false;
 };

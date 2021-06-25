@@ -15,32 +15,50 @@ limitations under the License.
 
 #include "tensorflow/core/kernels/data/prefetch_autotuner.h"
 
-namespace tensorflow {
+#include "tensorflow/core/framework/model.h"
 
-PrefetchAutotuner::PrefetchAutotuner(int64 initial_buffer_size)
+namespace tensorflow {
+namespace data {
+
+PrefetchAutotuner::PrefetchAutotuner(int64 initial_buffer_size,
+                                     int64 buffer_size_min)
     : buffer_limit_(initial_buffer_size) {
-  if (initial_buffer_size == kAutoTune) {
+  if (initial_buffer_size == model::kAutotune) {
     mode_ = Mode::kUpswing;
-    buffer_limit_ = 1;
+    buffer_limit_ = std::max(int64{1}, buffer_size_min);
   }
 }
+
+namespace {
+// Determines what strategy to use for increasing the buffer size limit. For
+// limits less than the threshold, an exponential increase is used, while for
+// limits greater than or equal to the threshold, a linear increase is used.
+size_t kBufferLimitThreshold = 2048;
+}  // namespace
 
 void PrefetchAutotuner::RecordConsumption(size_t current_buffer_size) {
   switch (mode_) {
     case Mode::kDisabled:
       return;
     case Mode::kUpswing:
-      if (current_buffer_size == buffer_limit_) {
+      if (static_cast<tensorflow::int64>(current_buffer_size) ==
+          buffer_limit_) {
         mode_ = Mode::kDownswing;
       }
       return;
     case Mode::kDownswing:
       if (current_buffer_size == 0) {
-        buffer_limit_ *= 2;  // Increase the buffer size.
+        if (buffer_limit_ >=
+            static_cast<tensorflow::int64>(kBufferLimitThreshold)) {
+          buffer_limit_ += kBufferLimitThreshold;
+        } else {
+          buffer_limit_ *= 2;
+        }
         mode_ = Mode::kUpswing;
       }
       return;
   }
 }
 
+}  // namespace data
 }  // namespace tensorflow

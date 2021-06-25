@@ -37,7 +37,7 @@ void XfeedQueueManager::Reset() {
 }
 
 void XfeedQueueManager::EnqueueBuffersAtomically(
-    tensorflow::gtl::ArraySlice<XfeedBuffer*> buffers) {
+    absl::Span<XfeedBuffer* const> buffers) {
   tensorflow::mutex_lock l(mu_);
   bool was_empty = enqueued_buffers_.empty();
   for (XfeedBuffer* b : buffers) {
@@ -78,6 +78,14 @@ void XfeedQueueManager::ReleaseCurrentBuffer(int32 length, void* data,
   CHECK_EQ(data, current_buffer_->data());
   current_buffer_->Done(std::move(shape));
   current_buffer_ = nullptr;
+}
+
+int64 GetByteSizeRequirement(const Shape& shape, int64 pointer_size) {
+  if (shape.is_static() || shape.IsTuple()) {
+    return ShapeUtil::ByteSizeOf(shape, pointer_size);
+  }
+  int64 metadata_size = sizeof(int32) * shape.dimensions_size();
+  return ShapeUtil::ByteSizeOf(shape, pointer_size) + metadata_size;
 }
 
 }  // namespace runtime
