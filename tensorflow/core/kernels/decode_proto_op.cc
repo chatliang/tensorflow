@@ -13,40 +13,44 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-// DecodeProto is a TensorFlow Op which extracts arbitrary fields
-// from protos serialized as strings.
+// DecodeProto is a TensorFlow op which extracts arbitrary fields from protos
+// serialized as strings.
 //
 // See docs in ../ops/decode_proto_op.cc.
 //
-// This implementation reads the serialized format using a handful of
-// calls from the WireFormatLite API used by generated proto code.
-// WireFormatLite is marked as an "internal" proto API but is widely
-// used in practice and highly unlikely to change.
-// This will be much faster than the previous implementation based on
-// constructing a temporary dynamic message in memory and using the
-// proto reflection api to read it.
-// It can be used with any proto whose descriptors are available at
-// runtime but should be competitive in speed with approaches that
-// compile in the proto definitions.
+// This implementation reads the serialized format using a handful of calls from
+// the WireFormatLite API used by generated proto code. WireFormatLite is marked
+// as an "internal" proto API but is widely used in practice and highly unlikely
+// to change. This will be much faster than the previous implementation based on
+// constructing a temporary dynamic message in memory and using the proto
+// reflection api to read it. It can be used with any proto whose descriptors
+// are available at runtime but should be competitive in speed with approaches
+// that compile in the proto definitions.
 
+#include <algorithm>
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <vector>
 
-#include "third_party/eigen3/Eigen/Core"
+#include "absl/container/flat_hash_map.h"
+#include "absl/types/span.h"
+#include "absl/types/variant.h"
+#include "Eigen/Core"  // from @eigen_archive
 #include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/framework/tensor_types.h"
+#include "tensorflow/core/framework/types.h"
 #include "tensorflow/core/lib/core/errors.h"
 #include "tensorflow/core/platform/logging.h"
 #include "tensorflow/core/platform/protobuf.h"
+#include "tensorflow/core/platform/tstring.h"
 #include "tensorflow/core/util/proto/decode.h"
 #include "tensorflow/core/util/proto/descriptors.h"
-#include "tensorflow/core/util/ptr_util.h"
+#include "tensorflow/core/util/proto/proto_utils.h"
 
 namespace tensorflow {
 namespace {
 
-using ::tensorflow::MakeUnique;
 using ::tensorflow::protobuf::Descriptor;
 using ::tensorflow::protobuf::DescriptorPool;
 using ::tensorflow::protobuf::DynamicMessageFactory;
@@ -58,70 +62,21 @@ using ::tensorflow::protobuf::io::CodedInputStream;
 
 const bool kFailOnDecodeError = true;
 
-// Returns true if the proto field type can be converted to the
-// tensorflow::DataType.
-bool CheckOutputType(FieldDescriptor::Type field_type, DataType output_type) {
-  switch (field_type) {
-    case WireFormatLite::TYPE_DOUBLE:
-      return output_type == tensorflow::DT_DOUBLE;
-    case WireFormatLite::TYPE_FLOAT:
-      return output_type == tensorflow::DT_FLOAT ||
-             output_type == tensorflow::DT_DOUBLE;
-    case WireFormatLite::TYPE_INT64:
-      return output_type == tensorflow::DT_INT64;
-    case WireFormatLite::TYPE_UINT64:
-      return output_type == tensorflow::DT_INT64;
-    case WireFormatLite::TYPE_INT32:
-      return output_type == tensorflow::DT_INT32;
-    case WireFormatLite::TYPE_FIXED64:
-      return output_type == tensorflow::DT_INT64;
-    case WireFormatLite::TYPE_FIXED32:
-      return output_type == tensorflow::DT_INT32 ||
-             output_type == tensorflow::DT_INT64;
-    case WireFormatLite::TYPE_BOOL:
-      return output_type == tensorflow::DT_BOOL;
-    case WireFormatLite::TYPE_STRING:
-      return output_type == tensorflow::DT_STRING;
-    case WireFormatLite::TYPE_GROUP:
-      return output_type == tensorflow::DT_STRING;
-    case WireFormatLite::TYPE_MESSAGE:
-      return output_type == tensorflow::DT_STRING;
-    case WireFormatLite::TYPE_BYTES:
-      return output_type == tensorflow::DT_STRING;
-    case WireFormatLite::TYPE_UINT32:
-      return output_type == tensorflow::DT_INT32 ||
-             output_type == tensorflow::DT_INT64;
-    case WireFormatLite::TYPE_ENUM:
-      return output_type == tensorflow::DT_INT32;
-    case WireFormatLite::TYPE_SFIXED32:
-      return output_type == tensorflow::DT_INT32;
-    case WireFormatLite::TYPE_SFIXED64:
-      return output_type == tensorflow::DT_INT64;
-    case WireFormatLite::TYPE_SINT32:
-      return output_type == tensorflow::DT_INT32;
-    case WireFormatLite::TYPE_SINT64:
-      return output_type == tensorflow::DT_INT64;
-      // default: intentionally omitted in order to enable static checking.
-  }
-}
-
 // Used to store the default value of a protocol message field, casted to the
 // type of the output tensor.
-//
-// TODO(paskin): Use absl::variant once TensorFlow gets absl dependencies.
 struct DefaultValue {
   DataType dtype = DataType::DT_INVALID;
-  union Value {
-    bool v_bool;           // DT_BOOL
-    uint8 v_uint8;         // DT_UINT8
-    int8 v_int8;           // DT_INT8
-    int32 v_int32;         // DT_INT32
-    int64 v_int64;         // DT_INT64
-    float v_float;         // DT_FLOAT
-    double v_double;       // DT_DOUBLE
-    const char* v_string;  // DT_STRING
-  };
-  Value value;
+  std::variant<bool,      // DT_BOOL
+               double,    // DT_DOUBLE
+               float,     // DT_FLOAT
+               int8_t,    // DT_INT8
+               int32_t,   // DT_INT32
+               int64_t,   // DT_INT64
+               tstring,   // DT_STRING
+               uint8_t,   // DT_UINT8
+               uint32_t,  // DT_UINT32
+               uint64_t>  // DT_UINT64
+      value;
 };
 
 // Initializes a DefaultValue object.  This generic template handles numeric
@@ -132,61 +87,64 @@ struct DefaultValue {
 //   value: the default value as obtained from the FieldDescriptor
 //   result: the object to initialize
 template <typename T>
-Status InitDefaultValue(DataType dtype, const T value, DefaultValue* result) {
+absl::Status InitDefaultValue(DataType dtype, const T value,
+                              DefaultValue* result) {
   result->dtype = dtype;
   switch (dtype) {
     case DT_BOOL:
-      result->value.v_bool = static_cast<bool>(value);
-      break;
-    case DT_INT32:
-      result->value.v_int32 = static_cast<int32>(value);
-      break;
-    case DT_INT8:
-      result->value.v_int8 = static_cast<int8>(value);
-      break;
-    case DT_UINT8:
-      result->value.v_uint8 = static_cast<uint8>(value);
-      break;
-    case DT_INT64:
-      result->value.v_int64 = static_cast<int64>(value);
-      break;
-    case DT_FLOAT:
-      result->value.v_float = static_cast<float>(value);
+      result->value = static_cast<bool>(value);
       break;
     case DT_DOUBLE:
-      result->value.v_double = static_cast<double>(value);
+      result->value = static_cast<double>(value);
+      break;
+    case DT_FLOAT:
+      result->value = static_cast<float>(value);
+      break;
+    case DT_INT8:
+      result->value = static_cast<int8_t>(value);
+      break;
+    case DT_INT32:
+      result->value = static_cast<int32_t>(value);
+      break;
+    case DT_INT64:
+      result->value = static_cast<int64_t>(value);
+      break;
+    case DT_UINT8:
+      result->value = static_cast<uint8_t>(value);
+      break;
+    case DT_UINT32:
+      result->value = static_cast<uint32_t>(value);
+      break;
+    case DT_UINT64:
+      result->value = static_cast<uint64_t>(value);
       break;
     default:
       // We should never get here, given the type checking that occurs earlier.
-      return errors::Internal(
-          "Cannot initialize default value for unsupported type: ",
-          DataTypeString(dtype));
+      return absl::InternalError(
+          absl::StrCat("Cannot initialize default value for unsupported type: ",
+                       DataTypeString(dtype)));
   }
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 template <>
-Status InitDefaultValue(DataType dtype, const char* value,
-                        DefaultValue* result) {
+absl::Status InitDefaultValue(DataType dtype, const tstring value,
+                              DefaultValue* result) {
   // These are sanity checks that should never trigger given the code that
   // leads here.
   if (TF_PREDICT_FALSE(dtype != DT_STRING)) {
-    return errors::InvalidArgument(
+    return absl::InvalidArgumentError(
         "Cannot cast field to anything but DT_STRING");
   }
-  if (TF_PREDICT_FALSE(value == nullptr)) {
-    return errors::InvalidArgument("Null default string value.");
-  }
   result->dtype = DT_STRING;
-  result->value.v_string = value;
-  return Status::OK();
+  result->value = value;
+  return absl::OkStatus();
 }
 
 // Initializes a default value from the output data type and the field
 // descriptor.
-Status InitDefaultValueFromFieldDescriptor(DataType dtype,
-                                           const FieldDescriptor* field_desc,
-                                           DefaultValue* result) {
+absl::Status InitDefaultValueFromFieldDescriptor(
+    DataType dtype, const FieldDescriptor* field_desc, DefaultValue* result) {
   switch (field_desc->type()) {
     case WireFormatLite::TYPE_DOUBLE:
       return InitDefaultValue(dtype, field_desc->default_value_double(),
@@ -201,7 +159,6 @@ Status InitDefaultValueFromFieldDescriptor(DataType dtype,
     case WireFormatLite::TYPE_UINT64:
       return InitDefaultValue(dtype, field_desc->default_value_uint64(),
                               result);
-    case WireFormatLite::TYPE_ENUM:
     case WireFormatLite::TYPE_INT32:
     case WireFormatLite::TYPE_SINT32:
     case WireFormatLite::TYPE_SFIXED32:
@@ -212,22 +169,24 @@ Status InitDefaultValueFromFieldDescriptor(DataType dtype,
                               result);
     case WireFormatLite::TYPE_BOOL:
       return InitDefaultValue(dtype, field_desc->default_value_bool(), result);
+    case WireFormatLite::TYPE_ENUM:
+      return InitDefaultValue(dtype, field_desc->default_value_enum()->number(),
+                              result);
     case WireFormatLite::TYPE_BYTES:
     case WireFormatLite::TYPE_STRING:
-      // Manipulating default string values as C-style pointers should be OK
-      // for typical code-generated protocol messages.  It is possible in
-      // principle to register a message descriptor on the fly, and these
-      // pointers may not be stable if that descriptor has a weird
-      // implementation.  (But the return type of default_value_string() is
-      // const string&, so it'd have to be very weird.)
-      return InitDefaultValue(dtype, field_desc->default_value_string().c_str(),
-                              result);
+      // Storing default string values by reference should be OK for typical
+      // code-generated protocol messages.  It is possible in principle to
+      // register a message descriptor on the fly, and these references may not
+      // be stable if that descriptor has a weird implementation.
+      return InitDefaultValue(
+          dtype, tstring().assign_as_view(field_desc->default_value_string()),
+          result);
     case WireFormatLite::TYPE_GROUP:
     case WireFormatLite::TYPE_MESSAGE:
-      return InitDefaultValue(dtype, "", result);
+      return InitDefaultValue(dtype, tstring(), result);
       // default: intentionally omitted in order to enable static checking.
   }
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 // A FieldInfo holds a handful of information from the FieldDescriptor
@@ -241,13 +200,11 @@ struct FieldInfo {
     number = field_desc->number();
 
     // The wire format library defines the same constants used in
-    // descriptor.proto. This static_cast is safe because they
-    // are guaranteed to stay in sync.
-    // We need the field type from the FieldDescriptor here
-    // because the wire format doesn't tell us anything about
-    // what happens inside a packed repeated field: there is
-    // enough information in the wire format to skip the
-    // whole field but not enough to know how to parse what's
+    // descriptor.proto. This static_cast is safe because they are guaranteed to
+    // stay in sync. We need the field type from the FieldDescriptor here
+    // because the wire format doesn't tell us anything about what happens
+    // inside a packed repeated field: there is enough information in the wire
+    // format to skip the whole field but not enough to know how to parse what's
     // inside. For that we go to the schema.
     type = static_cast<WireFormatLite::FieldType>(field_desc->type());
     is_repeated = field_desc->is_repeated();
@@ -257,16 +214,15 @@ struct FieldInfo {
   FieldInfo(const FieldInfo&) = delete;
   FieldInfo& operator=(const FieldInfo&) = delete;
 
-  // Internally we sort field descriptors by wire number for
-  // fast lookup. In general this is different from the order
-  // given by the user. Output_index gives the index into
-  // the field_names and output_types attributes and into
+  // Internally we sort field descriptors by wire number for fast lookup. In
+  // general this is different from the order given by the user. Output_index
+  // gives the index into the field_names and output_types attributes and into
   // the output tensor list.
   int output_index = -1;
 
-  // This is a cache of the relevant fields from `FieldDescriptorProto`.
-  // This was added after noticing that FieldDescriptor->type() was
-  // using 6% of the cpu profile.
+  // This is a cache of the relevant fields from `FieldDescriptorProto`. This
+  // was added after noticing that FieldDescriptor->type() was using 6% of the
+  // cpu profile.
   WireFormatLite::FieldType type;
   int number;
   bool is_repeated;
@@ -275,42 +231,43 @@ struct FieldInfo {
 
 // A CountCollector counts sizes of repeated and optional fields in a proto.
 //
-// Each field is tracked by a single CountCollector instance. The
-// instance manages a single count, which is stored as a pointer (it
-// is intended to be a reference to the `sizes` output which is being
-// filled in). The pointer is passed in at initialization.
+// Each field is tracked by a single CountCollector instance. The instance
+// manages a single count, which is stored as a pointer (it is intended to be a
+// reference to the `sizes` output which is being filled in). The pointer is
+// passed in at initialization.
 //
-// Counting is done as a separate pass in order to allocate output tensors
-// all at once. This allows the TensorFlow runtime to optimize allocation
-// for the consumer, while removing the need for copying inside this op.
-// After this pass, the DenseCollector class (below) gathers the data:
-// It is more complex and provides better motivation for the API here.
+// Counting is done as a separate pass in order to allocate output tensors all
+// at once. This allows the TensorFlow runtime to optimize allocation for the
+// consumer, while removing the need for copying inside this op. After this
+// pass, the DenseCollector class (below) gathers the data: it is more complex
+// and provides better motivation for the API here.
 class CountCollector {
  public:
   CountCollector() = delete;
 
   // The count may be stored inside an Eigen Tensor to eliminate copying.
-  explicit CountCollector(int32* count) : count_ptr_(count) {}
+  explicit CountCollector(int32_t* count) : count_ptr_(count) {}
 
   // Reads (in this case counts) a single value.
-  Status ReadValue(CodedInputStream* input, const FieldInfo& field) {
+  absl::Status ReadValue(CodedInputStream* input, const FieldInfo& field) {
     // Only repeated fields can have count > 1.
     if (*count_ptr_ == 0 || field.is_repeated) {
       (*count_ptr_)++;
     }
-    // We expect a wire type based on the schema field_type, to allow
-    // a little more checking.
+    // We expect a wire type based on the schema field_type, to allow a little
+    // more checking.
     if (!SkipValue(input, field)) {
-      return errors::DataLoss("ReadValue: Failed skipping field when counting");
+      return absl::DataLossError(
+          "ReadValue: Failed skipping field when counting");
     }
-    return Status::OK();
+    return absl::OkStatus();
   }
 
   // Reads (in this case counts) a length-delimited list of values.
-  Status ReadPackedValues(CodedInputStream* input, const FieldInfo& field,
-                          size_t buf_size) {
+  absl::Status ReadPackedValues(CodedInputStream* input, const FieldInfo& field,
+                                size_t buf_size) {
     if (buf_size == 0) {
-      return Status::OK();
+      return absl::OkStatus();
     }
 
     const void* tmpbuf;
@@ -320,18 +277,19 @@ class CountCollector {
     // This is safe because the underlying storage for the CodedInputStream is
     // owned by the input tensor. If it were a Cord or file-backed stream this
     // pointer would go stale after the bytes were skipped.
-    const uint8* buf = reinterpret_cast<const uint8*>(tmpbuf);
+    const uint8_t* buf = reinterpret_cast<const uint8_t*>(tmpbuf);
 
     // Important: we skipped the input->{Push,Pop}Limit() calls for speed,
     // so the bounds check on buf_size inside Skip() is critical, and
     // must be done before scanning the contents.
     if (!input->Skip(buf_size)) {
-      return errors::DataLoss("ReadPackedValues: Skipping packed field failed");
+      return absl::DataLossError(
+          "ReadPackedValues: Skipping packed field failed");
     }
 
-    // Dispatch to the appropriately typed field reader based on the
-    // schema type.
-    Status st;
+    // Dispatch to the appropriately typed field reader based on the schema
+    // type.
+    absl::Status st;
     switch (field.type) {
       case WireFormatLite::TYPE_DOUBLE:
         st = CountPackedFixed<double>(buf, buf_size);
@@ -349,25 +307,25 @@ class CountCollector {
         st = CountPackedVarint(buf, buf_size);
         break;
       case WireFormatLite::TYPE_FIXED64:
-        st = CountPackedFixed<uint64>(buf, buf_size);
+        st = CountPackedFixed<uint64_t>(buf, buf_size);
         break;
       case WireFormatLite::TYPE_FIXED32:
-        st = CountPackedFixed<uint32>(buf, buf_size);
+        st = CountPackedFixed<uint32_t>(buf, buf_size);
         break;
       case WireFormatLite::TYPE_BOOL:
         st = CountPackedVarint(buf, buf_size);
         break;
       case WireFormatLite::TYPE_STRING:
-        st = errors::DataLoss("TYPE_STRING encountered as packed");
+        st = absl::DataLossError("TYPE_STRING encountered as packed");
         break;
       case WireFormatLite::TYPE_GROUP:
-        st = errors::DataLoss("TYPE_GROUP encountered as packed");
+        st = absl::DataLossError("TYPE_GROUP encountered as packed");
         break;
       case WireFormatLite::TYPE_MESSAGE:
-        st = errors::DataLoss("TYPE_MESSAGE encountered as packed");
+        st = absl::DataLossError("TYPE_MESSAGE encountered as packed");
         break;
       case WireFormatLite::TYPE_BYTES:
-        st = errors::DataLoss("TYPE_BYTES encountered as packed");
+        st = absl::DataLossError("TYPE_BYTES encountered as packed");
         break;
       case WireFormatLite::TYPE_UINT32:
         st = CountPackedVarint(buf, buf_size);
@@ -376,10 +334,10 @@ class CountCollector {
         st = CountPackedVarint(buf, buf_size);
         break;
       case WireFormatLite::TYPE_SFIXED32:
-        st = CountPackedFixed<int32>(buf, buf_size);
+        st = CountPackedFixed<int32_t>(buf, buf_size);
         break;
       case WireFormatLite::TYPE_SFIXED64:
-        st = CountPackedFixed<int64>(buf, buf_size);
+        st = CountPackedFixed<int64_t>(buf, buf_size);
         break;
       case WireFormatLite::TYPE_SINT32:
         st = CountPackedVarint(buf, buf_size);
@@ -396,68 +354,66 @@ class CountCollector {
     if (!field.is_repeated && *count_ptr_ > 1) {
       *count_ptr_ = 1;
     }
-    return Status::OK();
+    return absl::OkStatus();
   }
 
  private:
   // Skips a length-delimited value.
   static bool SkipBytes(CodedInputStream* input) {
-    uint32 length;
+    uint32_t length;
     if (!input->ReadVarint32(&length)) {
       return false;
     }
     return input->Skip(length);
   }
 
-  // Counts the number of packed varints in an array.
-  // The end of a varint is signaled by a value < 0x80,
-  // so counting them requires parsing the bytestream.
-  // It is the caller's responsibility to ensure that len > 0.
-  Status CountPackedVarint(const uint8* buf, size_t len) {
-    const uint8* bound = buf + len;
+  // Counts the number of packed varints in an array. The end of a varint is
+  // signaled by a value < 0x80, so counting them requires parsing the
+  // bytestream. It is the caller's responsibility to ensure that len > 0.
+  absl::Status CountPackedVarint(const uint8_t* buf, size_t len) {
+    const uint8_t* bound = buf + len;
     int count;
 
-    // The last byte in a valid encoded varint is guaranteed to have
-    // the high bit unset. We rely on this property to prevent
-    // ReadVarint64FromArray from going out of bounds, so validate
-    // the end of the buf before scanning anything.
+    // The last byte in a valid encoded varint is guaranteed to have the high
+    // bit unset. We rely on this property to prevent ReadVarint64FromArray from
+    // going out of bounds, so validate the end of the buf before scanning
+    // anything.
     if (bound[-1] & 0x80) {
-      return errors::DataLoss("Corrupt packed varint");
+      return absl::DataLossError("Corrupt packed varint");
     }
 
     // Now we can trust ReadVarint64FromArray to stay in bounds.
     for (count = 0; buf < bound; ++count) {
-      uint64 temp;
+      uint64_t temp;
       bool ok;
       buf = internal::ReadVarint64FromArray(buf, &ok, &temp);
       if (!ok) {
-        return errors::DataLoss("Corrupt packed varint");
+        return absl::DataLossError("Corrupt packed varint");
       }
     }
 
     *count_ptr_ += count;
-    return Status::OK();
+    return absl::OkStatus();
   }
 
-  // Counts the number of fixed-size values in a packed field.
-  // This can be done without actually parsing anything.
+  // Counts the number of fixed-size values in a packed field. This can be done
+  // without actually parsing anything.
   template <typename T>
-  Status CountPackedFixed(const uint8* unused_buf, size_t len) {
+  absl::Status CountPackedFixed(const uint8_t* unused_buf, size_t len) {
     int count = len / sizeof(T);
     if (count * sizeof(T) != len) {
-      return errors::DataLoss(
-          "Illegal data length for packed fixed-size type: ", len);
+      return absl::DataLossError(absl::StrCat(
+          "Illegal data length for packed fixed-size type: ", len));
     }
     *count_ptr_ += len / sizeof(T);
-    return Status::OK();
+    return absl::OkStatus();
   }
 
-  // Skips a single value in the input stream.
-  // Dispatches to the appropriately typed field skipper based on the
-  // schema type tag.
-  // This is not as permissive as just handling the wire type.
+  // Skips a single value in the input stream. Dispatches to the appropriately
+  // typed field skipper based on the schema type tag. This is not as permissive
+  // as just handling the wire type.
   static bool SkipValue(CodedInputStream* input, const FieldInfo& field) {
-    uint32 tmp32;
+    uint32_t tmp32;
     protobuf_uint64 tmp64;
     switch (field.type) {
       case WireFormatLite::TYPE_DOUBLE:
@@ -502,25 +458,26 @@ class CountCollector {
     }
   }
 
-  int32* count_ptr_ = nullptr;
+  int32_t* count_ptr_ = nullptr;
 };
 
 // A DenseCollector accumulates values from a proto into a tensor.
 //
-// There is an instance of DenseCollector for each field of each
-// proto. The DenseCollector deserializes the value from the wire
-// directly into the preallocated output Tensor.
+// There is an instance of DenseCollector for each field of each proto. The
+// DenseCollector deserializes the value from the wire directly into the
+// preallocated output Tensor.
 //
-// This class is named DenseCollector because in the future there should
-// be a SparseCollector that accumulates field data into sparse tensors if
-// the user requests it.
+// This class is named DenseCollector because in the future there should be a
+// SparseCollector that accumulates field data into sparse tensors if the user
+// requests it.
 class DenseCollector {
  public:
   DenseCollector() = delete;
 
   // A DenseCollector applies to one field of a serialized message.
   // Note that default_value.dtype is the type of the output tensor.
-  DenseCollector(uint8* datap, DefaultValue default_value, int max_repeat_count)
+  DenseCollector(uint8_t* datap, DefaultValue default_value,
+                 int max_repeat_count)
       : datap_(datap),
         default_value_(default_value),
         max_repeat_count_(max_repeat_count) {}
@@ -530,16 +487,21 @@ class DenseCollector {
   // Always inlining gave a ~50% speedup on microbenchmarks at one point.
   // TODO(nix): try removing it to see if that still holds.
   // TODO(jsimsa): ABSL_ATTRIBUTE_ALWAYS_INLINE
-  Status ReadValue(CodedInputStream* input, const FieldInfo& field) {
+  absl::Status ReadValue(CodedInputStream* input, const FieldInfo& field) {
     // For required and optional fields, we overwrite values[0] with
     // the latest one in the wire stream.
     // See https://developers.google.com/protocol-buffers/docs/encoding#optional
     // Only for repeated fields do we advance the next_repeat_index_ past 1.
     // TODO(nix): to handle oneof we must also zero out any previous values
     //  seen on the wire.
-    int32 index = 0;
+    int32_t index = 0;
     if (field.is_repeated) {
       index = next_repeat_index_;
+    }
+    if (index >= max_repeat_count_) {
+      return absl::DataLossError(absl::StrCat(
+          "ReadValue: Tried to write more entries than allowed.  Field tag: ",
+          field.number, ", Max entries allowed: ", max_repeat_count_));
     }
     next_repeat_index_ = index + 1;
 
@@ -548,8 +510,14 @@ class DenseCollector {
   }
 
   // Reads and stores a length-delimited list of values.
-  Status ReadPackedValues(CodedInputStream* input, const FieldInfo& field,
-                          const size_t buf_size) {
+  absl::Status ReadPackedValues(CodedInputStream* input, const FieldInfo& field,
+                                const size_t buf_size) {
+    // An empty packed run holds no values (CountCollector counts none), so it
+    // must not fail the bounds check below when the output is already full.
+    if (buf_size == 0) {
+      return absl::OkStatus();
+    }
+
     const void* buf;
     int unused_max_buf_size;
     input->GetDirectBufferPointerInline(&buf, &unused_max_buf_size);
@@ -557,76 +525,87 @@ class DenseCollector {
     // owned by the input tensor. If it were a Cord or file-backed stream this
     // pointer would go stale after the bytes were skipped.
     if (!input->Skip(buf_size)) {
-      return errors::DataLoss(
+      return absl::DataLossError(absl::StrCat(
           "ReadPackedValues: Skipping packed field failed.  Field tag: ",
-          field.number);
+          field.number));
     }
 
     // Setting stride=0 causes new values to overwrite old ones for
-    // non-repeated fields.
+    // non-repeated fields, which always write at index 0 (as in ReadValue).
     const int stride = field.is_repeated ? 1 : 0;
-
-    if (next_repeat_index_ >= max_repeat_count_) {
-      return errors::DataLoss(
+    int32_t index = 0;
+    if (field.is_repeated) {
+      index = next_repeat_index_;
+    }
+    if (index >= max_repeat_count_) {
+      return absl::DataLossError(absl::StrCat(
           "ReadPackedValues: Tried to write more entries than allowed.  "
           "Field tag: ",
-          field.number, ", Max entries allowed: ", max_repeat_count_);
-    } else {
-      return internal::ReadPackedFromArray(buf, buf_size, field.type,
-                                           field.number, default_value_.dtype,
-                                           stride, &next_repeat_index_, datap_);
+          field.number, ", Max entries allowed: ", max_repeat_count_));
     }
+
+    absl::Status status = internal::ReadPackedFromArray(
+        buf, buf_size, field.type, field.number, default_value_.dtype, stride,
+        max_repeat_count_, &index, datap_);
+    // A non-repeated field ends at index 1 once it holds a value, and stays
+    // filled when it later appears again (including as an empty packed run).
+    next_repeat_index_ = std::max(next_repeat_index_, index);
+    return status;
   }
 
-  // Fills in any missing values in the output array with defaults.
-  // Dispatches to the appropriately typed field default based on the
-  // runtime type tag.
-  Status FillWithDefaults() {
+  // Fills in any missing values in the output array with defaults. Dispatches
+  // to the appropriately typed field default based on the runtime type tag.
+  absl::Status FillWithDefaults() {
     switch (default_value_.dtype) {
-      case DataType::DT_FLOAT:
-        return FillDefault<float>(default_value_.value.v_float);
-      case DataType::DT_DOUBLE:
-        return FillDefault<double>(default_value_.value.v_double);
-      case DataType::DT_INT32:
-        return FillDefault<int32>(default_value_.value.v_int32);
-      case DataType::DT_UINT8:
-        return FillDefault<uint8>(default_value_.value.v_uint8);
-      case DataType::DT_INT8:
-        return FillDefault<int8>(default_value_.value.v_int8);
-      case DataType::DT_STRING:
-        return FillDefault<string>(default_value_.value.v_string);
-      case DataType::DT_INT64:
-        return FillDefault<int64>(default_value_.value.v_int64);
       case DataType::DT_BOOL:
-        return FillDefault<bool>(default_value_.value.v_bool);
+        return FillDefault(absl::get<bool>(default_value_.value));
+      case DataType::DT_FLOAT:
+        return FillDefault(absl::get<float>(default_value_.value));
+      case DataType::DT_DOUBLE:
+        return FillDefault(absl::get<double>(default_value_.value));
+      case DataType::DT_INT8:
+        return FillDefault(absl::get<int8_t>(default_value_.value));
+      case DataType::DT_INT32:
+        return FillDefault(absl::get<int32_t>(default_value_.value));
+      case DataType::DT_INT64:
+        return FillDefault(absl::get<int64_t>(default_value_.value));
+      case DataType::DT_STRING:
+        return FillDefault(absl::get<tstring>(default_value_.value));
+      case DataType::DT_UINT8:
+        return FillDefault(absl::get<uint8_t>(default_value_.value));
+      case DataType::DT_UINT32:
+        return FillDefault(absl::get<uint32_t>(default_value_.value));
+      case DataType::DT_UINT64:
+        return FillDefault(absl::get<uint64_t>(default_value_.value));
       default:
         // There are many tensorflow dtypes not handled here, but they
         // should not come up unless type casting is added to the Op.
         // Chaining with tf.cast() should do the right thing until then.
-        return errors::DataLoss(
-            "Failed filling defaults in unknown tf::DataType");
+        return absl::DataLossError(
+            absl::StrCat("Failed filling defaults for ",
+                         DataTypeString(default_value_.dtype)));
     }
   }
 
  private:
-  // Fills empty values in the dense representation with a
-  // default value. This uses next_repeat_index_ which counts the number
-  // of parsed values for the field.
+  // Fills empty values in the dense representation with a default value. This
+  // uses next_repeat_index_ which counts the number of parsed values for the
+  // field.
   template <class T>
-  Status FillDefault(const T& default_value) {
+  absl::Status FillDefault(const T& default_value) {
     for (int i = next_repeat_index_; i < max_repeat_count_; i++) {
       reinterpret_cast<T*>(datap_)[i] = default_value;
     }
-    return Status::OK();
+    return absl::OkStatus();
   }
 
-  int32 next_repeat_index_ = 0;
+  int32_t next_repeat_index_ = 0;
 
-  // This is a pointer to data_[message_index_].
-  // There is no bounds checking at this level: we computed the max
-  // repeat size for each field in CountCollector and use the same
-  // code to traverse it here, so we are guaranteed not to be called
-  // for more items than we have allocated space.
+  // This is a pointer to data_[message_index_], which has room for
+  // max_repeat_count_ values. We computed the max repeat size for each field in
+  // CountCollector and use the same code to traverse it here, but every write
+  // is still checked against max_repeat_count_ so that a disagreement between
+  // the two passes is reported as an error instead of writing out of bounds.
   void* const datap_ = nullptr;
 
   const DefaultValue default_value_;
@@ -636,7 +615,7 @@ class DenseCollector {
 class DecodeProtoOp : public OpKernel {
  public:
   explicit DecodeProtoOp(OpKernelConstruction* context) : OpKernel(context) {
-    string descriptor_source;
+    std::string descriptor_source;
     OP_REQUIRES_OK(context,
                    context->GetAttr("descriptor_source", &descriptor_source));
 
@@ -646,45 +625,73 @@ class DecodeProtoOp : public OpKernel {
     OP_REQUIRES_OK(context, GetDescriptorPool(context->env(), descriptor_source,
                                               &desc_pool, &owned_desc_pool_));
 
-    string message_type;
+    std::string message_type;
     OP_REQUIRES_OK(context, context->GetAttr("message_type", &message_type));
 
     const Descriptor* message_desc =
         desc_pool->FindMessageTypeByName(message_type);
     OP_REQUIRES(context, message_desc != nullptr,
-                errors::InvalidArgument("No descriptor found for message type ",
-                                        message_type));
+                absl::InvalidArgumentError(absl::StrCat(
+                    "No descriptor found for message type ", message_type)));
 
-    std::vector<string> field_names;
+    std::vector<std::string> field_names;
     OP_REQUIRES_OK(context, context->GetAttr("field_names", &field_names));
     std::vector<DataType> output_types;
     OP_REQUIRES_OK(context, context->GetAttr("output_types", &output_types));
-    OP_REQUIRES(
-        context, field_names.size() == output_types.size(),
-        errors::InvalidArgument("field_names and output_types attributes must "
-                                "have the same length"));
+    OP_REQUIRES(context, field_names.size() == output_types.size(),
+                absl::InvalidArgumentError(
+                    "field_names and output_types attributes must "
+                    "have the same length"));
 
     // Gather the field descriptors and check that requested output types match.
-
     int field_index = 0;
     std::vector<const FieldDescriptor*> field_descs;
-    for (const string& name : field_names) {
+    std::vector<const FieldDescriptor*> exts;
+    absl::flat_hash_map<std::string, const FieldDescriptor*> ext_name_to_field;
+    std::vector<const FieldDescriptor*>::iterator ext_it = exts.begin();
+    for (const std::string& name : field_names) {
       auto fd = message_desc->FindFieldByName(name);
-      OP_REQUIRES(context, fd != nullptr,
-                  errors::InvalidArgument("Unknown field: ", name,
-                                          " in message type ", message_type));
-      OP_REQUIRES(context,
-                  CheckOutputType(fd->type(), output_types[field_index]),
-                  // Many TensorFlow types don't have corresponding proto types
-                  // and the user will get an error if they are requested. It
-                  // would be nice to allow conversions here, but tf.cast
-                  // already exists so we don't duplicate the functionality.
-                  // Known unhandled types:
-                  //   DT_INT16 DT_COMPLEX64 DT_QINT8 DT_QUINT8 DT_QINT32
-                  //   DT_BFLOAT16 DT_QINT16 DT_QUINT16 DT_UINT16
-                  errors::InvalidArgument("Unexpected output type for ",
-                                          fd->full_name(), ": ", fd->cpp_type(),
-                                          " to ", output_types[field_index]));
+      if (fd == nullptr) {
+        // If field can't be found in original message, try to find a matching
+        // extension (by its full_name). First check a hashmap for a matching
+        // extension, and if not found, then iterate through available
+        // extensions to find a match (updating the hashmap while iterating.)
+        auto lookup_result = ext_name_to_field.find(name);
+        if (lookup_result != ext_name_to_field.end()) {
+          fd = lookup_result->second;
+        } else {
+          if (ext_it == exts.begin()) {
+            desc_pool->FindAllExtensions(message_desc, &exts);
+            ext_it = exts.begin();
+          }
+          while (ext_it != exts.end()) {
+            auto ext_name = (*ext_it)->full_name();
+            auto ext_field = *ext_it;
+            ++ext_it;
+
+            ext_name_to_field.try_emplace(ext_name, ext_field);
+            if (ext_name == name) {
+              fd = ext_field;
+              break;
+            }
+          }
+        }
+      }
+      OP_REQUIRES(
+          context, fd != nullptr,
+          absl::InvalidArgumentError(absl::StrCat(
+              "Unknown field: ", name, " in message type ", message_type)));
+      OP_REQUIRES(
+          context,
+          proto_utils::IsCompatibleType(fd->type(), output_types[field_index]),
+          // Many TensorFlow types don't have corresponding proto types and the
+          // user will get an error if they are requested. It would be nice to
+          // allow conversions here, but tf.cast already exists so we don't
+          // duplicate the functionality.
+          absl::InvalidArgumentError(
+              absl::StrCat("Unexpected output type for ", fd->full_name(), ": ",
+                           fd->cpp_type_name(), " to ",
+                           DataType_Name(output_types[field_index]))));
 
       field_index++;
       field_descs.push_back(fd);
@@ -711,25 +718,25 @@ class DecodeProtoOp : public OpKernel {
       DefaultValue default_value;
       OP_REQUIRES_OK(context, InitDefaultValueFromFieldDescriptor(
                                   dtype, field_descriptor, &default_value));
-      fields_.push_back(
-          MakeUnique<FieldInfo>(field_descriptor, output_index, default_value));
+      fields_.push_back(std::make_unique<FieldInfo>(
+          field_descriptor, output_index, default_value));
     }
 
     message_prototype_ = message_factory_.GetPrototype(message_desc);
-    OP_REQUIRES(context, message_prototype_ != nullptr,
-                errors::InvalidArgument("Couldn't get prototype message: ",
-                                        message_desc->full_name()));
-    string format;
+    OP_REQUIRES(
+        context, message_prototype_ != nullptr,
+        absl::InvalidArgumentError(absl::StrCat(
+            "Couldn't get prototype message: ", message_desc->full_name())));
+    std::string format;
     OP_REQUIRES_OK(context, context->GetAttr("message_format", &format));
     OP_REQUIRES(
         context, format == "binary" || format == "text",
-        errors::InvalidArgument("format must be one of binary or text"));
+        absl::InvalidArgumentError("format must be one of binary or text"));
     is_binary_ = format == "binary";
 
-    // Enable the initial protobuf sanitizer, which is much
-    // more expensive than the decoder.
-    // TODO(nix): Remove this once the fast decoder
-    // has passed security review.
+    // Enable the initial protobuf sanitizer, which is much more expensive than
+    // the decoder.
+    // TODO(nix): Remove this once the fast decoder has passed security review.
     OP_REQUIRES_OK(context, context->GetAttr("sanitize", &sanitize_));
   }
 
@@ -737,41 +744,41 @@ class DecodeProtoOp : public OpKernel {
     const Tensor& buf_tensor = ctx->input(0);
     int message_count = buf_tensor.NumElements();
     OP_REQUIRES(ctx, message_count >= 1,
-                errors::InvalidArgument(
+                absl::InvalidArgumentError(
                     "Bufs argument must contain at least one value"));
 
     int field_count = fields_.size();
 
-    // Save the argument shape for later, then flatten the input
-    // Tensor since we are working componentwise. We will restore
-    // the same shape in the returned Tensor.
+    // Save the argument shape for later, then flatten the input Tensor since we
+    // are working componentwise. We will restore the same shape in the returned
+    // Tensor.
     const TensorShape& shape_prefix = buf_tensor.shape();
 
     TensorShape sizes_shape = shape_prefix;
-    sizes_shape.AddDim(field_count);
+    OP_REQUIRES_OK(ctx, sizes_shape.AddDimWithStatus(field_count));
     Tensor* sizes_tensor = nullptr;
     OP_REQUIRES_OK(ctx, ctx->allocate_output(0, sizes_shape, &sizes_tensor));
 
-    // This is used to allocate binary bufs if used. It serves only
-    // to define memory ownership.
-    std::vector<string> tmp_binary_bufs(message_count);
+    // This is used to allocate binary bufs if used. It serves only to define
+    // memory ownership.
+    std::vector<tstring> tmp_binary_bufs(message_count);
 
     // These are the actual buffers to use, which may be in tmp_binary_bufs
     // or may be pointers into the buf_tensor. Either way they are not owned
     // here.
-    std::vector<const string*> bufs;
+    std::vector<const tstring*> bufs;
 
     if (is_binary_ && !sanitize_) {
       // Fast path.
       for (int mi = 0; mi < message_count; ++mi) {
-        const string* buf = &buf_tensor.flat<string>()(mi);
+        const tstring* buf = &buf_tensor.flat<tstring>()(mi);
         bufs.push_back(buf);
       }
     } else {
-      // We will have to allocate a copy, either to convert from text to
-      // binary or to sanitize a binary proto.
+      // We will have to allocate a copy, either to convert from text to binary
+      // or to sanitize a binary proto.
       for (int mi = 0; mi < message_count; ++mi) {
-        ReserializeMessage(ctx, buf_tensor.flat<string>()(mi),
+        ReserializeMessage(ctx, buf_tensor.flat<tstring>()(mi),
                            &tmp_binary_bufs[mi]);
         if (!ctx->status().ok()) {
           return;
@@ -780,17 +787,15 @@ class DecodeProtoOp : public OpKernel {
       }
     }
 
-    // Walk through all the strings in the input tensor, counting
-    // the number of fields in each.
-    // We can't allocate our actual output Tensor until we know the
-    // maximum repeat count, so we do a first pass through the serialized
-    // proto just counting fields.
-    // We always allocate at least one value so that optional fields
-    // are populated with default values - this avoids a TF
-    // conditional when handling the output data.
-    // The caller can distinguish between real data and defaults
-    // using the repeat count matrix that is returned by decode_proto.
-    std::vector<int32> max_sizes(field_count, 1);
+    // Walk through all the strings in the input tensor, counting the number of
+    // fields in each. We can't allocate our actual output Tensor until we know
+    // the maximum repeat count, so we do a first pass through the serialized
+    // proto just counting fields. We always allocate at least one value so that
+    // optional fields are populated with default values - this avoids a TF
+    // conditional when handling the output data. The caller can distinguish
+    // between real data and defaults using the repeat count matrix that is
+    // returned by decode_proto.
+    std::vector<int32_t> max_sizes(field_count, 1);
     for (int mi = 0; mi < message_count; ++mi) {
       CountFields(ctx, mi, *bufs[mi], sizes_tensor, &max_sizes);
       if (!ctx->status().ok()) {
@@ -804,67 +809,67 @@ class DecodeProtoOp : public OpKernel {
     //   the memory of the input tensor.
     std::vector<Tensor*> outputs(field_count);
     for (int fi = 0; fi < field_count; ++fi) {
-      TensorShape flat_shape = {static_cast<int64>(message_count),
+      TensorShape flat_shape = {static_cast<int64_t>(message_count),
                                 max_sizes[fi]};
       TensorShape out_shape = shape_prefix;
-      out_shape.AddDim(max_sizes[fi]);
+      OP_REQUIRES_OK(ctx, out_shape.AddDimWithStatus(max_sizes[fi]));
 
       // Surprisingly we don't specify the types from the output_types
       // attribute: that is done for us based on the Op declaration:
       //  REGISTER_OP(...)
       //    .Attr("output_types: list(type) >= 0")
       //    .Output("values: output_types")
-      OP_REQUIRES_OK(ctx,
-                     // ctx->allocate_output(output_indices_[fi] + 1,
-                     ctx->allocate_output(fields_[fi]->output_index + 1,
-                                          out_shape, &outputs[fi]));
+      OP_REQUIRES_OK(ctx, ctx->allocate_output(fields_[fi]->output_index + 1,
+                                               out_shape, &outputs[fi]));
     }
 
-    // Make the second pass through the serialized proto, decoding
-    // into preallocated tensors.
+    // Make the second pass through the serialized proto, decoding into
+    // preallocated tensors.
     AccumulateFields(ctx, bufs, outputs);
   }
 
  private:
   // Copy a serialized message to binary, e.g. to handle text proto inputs.
-  void ReserializeMessage(OpKernelContext* ctx, const string& buf,
-                          string* binary_buf) {
+  void ReserializeMessage(OpKernelContext* ctx, const tstring& buf,
+                          tstring* binary_buf) {
     // Handle text protos by translating them to binary.
     std::unique_ptr<Message> message(message_prototype_->New());
-    OP_REQUIRES(ctx, message, errors::DataLoss("Initializing message failed"));
+    OP_REQUIRES(ctx, message,
+                absl::DataLossError("Initializing message failed"));
 
     if (is_binary_) {
       // If we get here we are sanitizing the input protobuf by parsing
       // and reserializing it with a trusted (but very slow) library.
       OP_REQUIRES(ctx, message->ParseFromString(buf),
-                  errors::DataLoss("Unable to parse binary protobuf"));
+                  absl::DataLossError("Unable to parse binary protobuf"));
     } else {
       OP_REQUIRES(ctx, TextFormat::ParseFromString(buf, message.get()),
-                  errors::DataLoss("Unable to parse text protobuf"));
+                  absl::DataLossError("Unable to parse text protobuf"));
     }
 
-    OP_REQUIRES(ctx, message->SerializeToString(binary_buf),
-                errors::DataLoss("Unable to reserialize text proto as binary"));
+    OP_REQUIRES(
+        ctx, SerializeToTString(*message, binary_buf),
+        absl::DataLossError("Unable to reserialize text proto as binary"));
   }
 
   // Count the number of occurrences of each requested field in a message batch.
-  void CountFields(OpKernelContext* ctx, int message_index, const string& buf,
-                   Tensor* sizes_tensor, std::vector<int32>* max_sizes) {
+  void CountFields(OpKernelContext* ctx, int message_index, const tstring& buf,
+                   Tensor* sizes_tensor, std::vector<int32_t>* max_sizes) {
     int field_count = fields_.size();
 
-    CodedInputStream input(reinterpret_cast<const uint8*>(buf.c_str()),
+    CodedInputStream input(reinterpret_cast<const uint8_t*>(buf.c_str()),
                            buf.size());
 
-    std::vector<int32> field_sizes(field_count, 0);
+    std::vector<int32_t> field_sizes(field_count, 0);
     std::vector<CountCollector> counters;
     counters.reserve(field_count);
     for (int i = 0; i < field_count; i++) {
       counters.emplace_back(&field_sizes[i]);
     }
 
-    Status st = Collect(&input, &counters);
+    absl::Status st = Collect(&input, absl::MakeSpan(counters));
     if (st.ok() && !input.ConsumedEntireMessage()) {
-      st = errors::DataLoss("CountFields: Failed to consume entire buffer");
+      st = absl::DataLossError("CountFields: Failed to consume entire buffer");
     }
     if (kFailOnDecodeError) {
       OP_REQUIRES_OK(ctx, st);  // NOLINT
@@ -883,9 +888,9 @@ class DecodeProtoOp : public OpKernel {
     }
 
     // Update the size tensor and max repeat size for each field.
-    auto sizes = sizes_tensor->flat_inner_dims<int32>();
+    auto sizes = sizes_tensor->flat_inner_dims<int32_t>();
     for (int fi = 0; fi < field_count; fi++) {
-      int32 size = field_sizes[fi];
+      int32_t size = field_sizes[fi];
       sizes(message_index, fields_[fi]->output_index) = size;
       if ((*max_sizes)[fi] < size) {
         (*max_sizes)[fi] = size;
@@ -895,7 +900,7 @@ class DecodeProtoOp : public OpKernel {
 
   // Parse fields from a serialized message into preallocated tensors.
   void AccumulateFields(OpKernelContext* ctx,
-                        const std::vector<const string*>& bufs,
+                        const std::vector<const tstring*>& bufs,
                         std::vector<Tensor*> outputs) {
     struct TensorInfo {
       explicit TensorInfo(Tensor* tensor) {
@@ -909,21 +914,21 @@ class DecodeProtoOp : public OpKernel {
         if (dtype != DT_STRING) {
           const int element_size = DataTypeSize(dtype);
           CHECK_GT(element_size, 0);
-          stride = last_dim_size * element_size;
+          stride = static_cast<int64_t>(last_dim_size) * element_size;
 
-          const int64 flatshape[1] = {tensor->NumElements() * element_size};
-          data = tensor->bit_casted_shaped<uint8, 1>(flatshape).data();
+          const int64_t flatshape[1] = {tensor->NumElements() * element_size};
+          data = tensor->bit_casted_shaped<uint8_t, 1>(flatshape).data();
         } else {
           // DataTypeSize() returns 0 for string types.
-          stride = last_dim_size * sizeof(string);
-          data = reinterpret_cast<uint8*>(tensor->flat<string>().data());
+          stride = static_cast<int64_t>(last_dim_size) * sizeof(tstring);
+          data = reinterpret_cast<uint8_t*>(tensor->flat<tstring>().data());
         }
       }
 
       DataType dtype;
       int last_dim_size;
-      int stride;
-      uint8* data;
+      int64_t stride;
+      uint8_t* data;
     };
 
     int field_count = fields_.size();
@@ -935,7 +940,7 @@ class DecodeProtoOp : public OpKernel {
     }
 
     for (int message_index = 0; message_index < bufs.size(); ++message_index) {
-      const string& buf = *bufs[message_index];
+      const tstring& buf = *bufs[message_index];
 
       std::vector<DenseCollector> collectors;
       collectors.reserve(field_count);
@@ -949,11 +954,11 @@ class DecodeProtoOp : public OpKernel {
       }
 
       // Fill in output tensors from the wire.
-      CodedInputStream input(reinterpret_cast<const uint8*>(buf.c_str()),
+      CodedInputStream input(reinterpret_cast<const uint8_t*>(buf.c_str()),
                              buf.size());
-      Status st = Collect(&input, &collectors);
+      absl::Status st = Collect(&input, absl::MakeSpan(collectors));
       if (st.ok() && !input.ConsumedEntireMessage()) {
-        st = errors::DataLoss(
+        st = absl::DataLossError(
             "AccumulateFields: Failed to consume entire buffer");
       }
       if (kFailOnDecodeError) {
@@ -973,154 +978,134 @@ class DecodeProtoOp : public OpKernel {
     }
   }
 
-  // Look up the FieldDescriptor for a particular field number.
-  bool LookupField(int field_number, int* field_index) {
-    // Look up the FieldDescriptor using linear search.
-    // TODO(nix): this could be sped up with binary search, but we are
-    // already way off the fastpath at this point. If you see a hotspot
-    // here, somebody is sending you very inefficient protos.
-    for (int fi = fields_.size() - 1; fi >= 0; fi--) {
-      if (field_number == fields_[fi]->number) {
-        *field_index = fi;
-        return true;
-      }
-    }
-    return false;
-  }
-
   // Traverses a serialized protobuf, dispatching values to the collectors.
   template <class CollectorClass>
-  Status Collect(CodedInputStream* input,
-                 std::vector<CollectorClass>* collectors) {
-    int last_good_field_index = -1;
-    bool fields_disordered = false;
-    int prev_field_number = -1;
-    int field_number = -1;
-    int last_good_field_number = -1;
-    int next_good_field_number = fields_[0]->number;
+  absl::Status Collect(CodedInputStream* input,
+                       absl::Span<CollectorClass> collectors) {
+    // At the beginning of each loop, the last field number that was seen,
+    // regardless of whether it was collected or not, or -1 if no field has
+    // been seen before.
+    int last_seen_field_number = -1;
+    // The FieldInfo that is expected to be used next.
+    // It was either used to collect the last seen field number, or if the
+    // last seen field number was not in fields_, it is the next FieldInfo after
+    // the last seen field number. At the beginning it is the first FieldInfo.
+    auto expected_field_info_iter = fields_.begin();
 
     // The 'tag' variable should always be treated as tainted.
-    for (uint32 tag = input->ReadTag();
+    for (uint32_t tag = input->ReadTag();
          tag != 0 && WireFormatLite::GetTagWireType(tag) !=
                          WireFormatLite::WIRETYPE_END_GROUP;
-         tag = input->ReadTag(), prev_field_number = field_number) {
-      field_number = WireFormatLite::GetTagFieldNumber(tag);
-      const FieldInfo* field = nullptr;
+         tag = input->ReadTag()) {
+      DCHECK(expected_field_info_iter == fields_.begin() ||
+             last_seen_field_number >
+                 (*(expected_field_info_iter - 1))->number);
+      DCHECK(expected_field_info_iter == fields_.end() ||
+             last_seen_field_number <= (*expected_field_info_iter)->number);
 
-      // This takes advantage of the sorted field numbers in most serialized
-      // protos: it tries the next expected field first rather than doing
-      // a lookup by field number.
-      // TODO(nix): haberman@ suggests a hybrid approach with a lookup table
-      // for small field numbers and a hash table for larger ones. This would
-      // be a simpler approach that should offer comparable speed in most
-      // cases.
-      if (field_number == last_good_field_number) {
-        field = fields_[last_good_field_index].get();
-      } else {
-        if (field_number < prev_field_number) {
-          fields_disordered = true;
-        }
+      // The field wire number.
+      const int field_number = WireFormatLite::GetTagFieldNumber(tag);
+      // The field info associated with the field wire number.
+      const FieldInfo* field_info = nullptr;
 
-        // If fields are out of order, fall back to slow lookup.
-        if (fields_disordered) {
-          int field_index;
-          if (LookupField(field_number, &field_index)) {
-            field = fields_[field_index].get();
-            last_good_field_index = field_index;
-          }
-        } else {
-          // If we see a field that is past the next field we want,
-          // it was empty. Look for the one after that.
-          // Repeat until we run out of fields that we care about.
-          while (field_number >= next_good_field_number) {
-            if (field_number == next_good_field_number) {
-              last_good_field_number = field_number;
-              field = fields_[last_good_field_index + 1].get();
-            }
-
-            // Start looking for the field after the current one.
-            ++last_good_field_index;
-            if (last_good_field_index < fields_.size() - 1) {
-              next_good_field_number =
-                  fields_[last_good_field_index + 1]->number;
-            } else {
-              // Saw something past the last field we care about.
-              // Continue parsing the message just in case there
-              // are disordered fields later, but any remaining
-              // ordered fields will have no effect.
-              next_good_field_number = INT_MAX;
-            }
-          }
-        }
+      // fields_ are ordered by their field numbers. If the field numbers
+      // on wire are also ordered (which is a convention), then we can
+      // monotonically increment `expected_field_info_iter` as the field
+      // numbers on wire get larger. If we detect any out-of-order
+      // field number, we reset `expected_field_info_iter`, and expect that
+      // future wire numbers are ordered. This algorithm is quadratic in the
+      // worst case where field numbers on wire are in descending order, however
+      // it works well in the case where two serialized protobufs are
+      // concatenated together.
+      if (field_number < last_seen_field_number) {
+        expected_field_info_iter = fields_.begin();
       }
 
-      if (!field) {
+      // Advance expected_field_info_iter until
+      // field_number <= expected_field_number.
+      for (; expected_field_info_iter != fields_.end();
+           ++expected_field_info_iter) {
+        DCHECK(expected_field_info_iter == fields_.begin() ||
+               field_number > (*(expected_field_info_iter - 1))->number);
+        const FieldInfo* expected_field_info = expected_field_info_iter->get();
+        if (field_number <= expected_field_info->number) {
+          if (field_number == expected_field_info->number) {
+            field_info = expected_field_info;
+          }
+          break;
+        }
+      }
+      last_seen_field_number = field_number;
+      if (!field_info) {
+        // This DCHECK verifies that if we skip a field, we didn't want it.
+        // In particular, field_builders is empty or the field_number is either:
+        // before fields_.begin().number or  after (fields_.end() - 1).number or
+        // in-between expected_field_info_iter and expected_field_info_iter - 1.
+        DCHECK(fields_.empty() || (field_number < (*fields_.begin())->number) ||
+               (field_number > (*(fields_.end() - 1))->number) ||
+               (((*(expected_field_info_iter - 1))->number < field_number) &&
+                (field_number < (*(expected_field_info_iter))->number)));
         // Unknown and unrequested fields are skipped.
         if (!WireFormatLite::SkipField(input, tag)) {
-          return errors::DataLoss("Failed skipping unrequested field");
+          return absl::DataLossError("Failed skipping unrequested field");
         }
         continue;
       }
 
-      Status st = CollectField(*field, WireFormatLite::GetTagWireType(tag),
-                               input, &(*collectors)[last_good_field_index]);
-      if (!st.ok()) {
-        return st;
-      }
+      TF_RETURN_IF_ERROR(CollectField(
+          *field_info, WireFormatLite::GetTagWireType(tag), input,
+          &collectors[expected_field_info_iter - fields_.begin()]));
     }
-    return Status::OK();
+    return absl::OkStatus();
   }
 
   // Collects values for a single field.
   template <class CollectorClass>
-  Status CollectField(const FieldInfo& field,
-                      WireFormatLite::WireType wire_type,
-                      CodedInputStream* input, CollectorClass* collector) {
+  absl::Status CollectField(const FieldInfo& field,
+                            WireFormatLite::WireType wire_type,
+                            CodedInputStream* input,
+                            CollectorClass* collector) {
     // The wire format library defines the same constants used in
-    // descriptor.proto. This static_cast is safe because they
-    // are guaranteed to stay in sync.
-    // We need the field type from the FieldDescriptor here
-    // because the wire format doesn't tell us anything about
-    // what happens inside a packed repeated field: there is
-    // enough information in the wire format to skip the
-    // whole field but not enough to know how to parse what's
-    // inside. For that we go to the schema.
+    // descriptor.proto. This static_cast is safe because they are guaranteed to
+    // stay in sync.
+    //
+    // We need the field type from the FieldDescriptor here because the wire
+    // format doesn't tell us anything about what happens inside a packed
+    // repeated field: there is enough information in the wire format to skip
+    // the whole field but not enough to know how to parse what's inside. For
+    // that we go to the schema.
     WireFormatLite::WireType schema_wire_type =
         WireFormatLite::WireTypeForFieldType(field.type);
 
-    // Handle packed repeated fields. SkipField would skip the
-    // whole length-delimited blob without letting us count the
-    // values, so we have to scan them ourselves.
+    // Handle packed repeated fields. SkipField would skip the whole
+    // length-delimited blob without letting us count the values, so we have to
+    // scan them ourselves.
     if (wire_type == WireFormatLite::WIRETYPE_LENGTH_DELIMITED &&
         schema_wire_type != WireFormatLite::WIRETYPE_LENGTH_DELIMITED) {
       // Handle packed repeated primitives.
       int length;
       if (!input->ReadVarintSizeAsInt(&length)) {
-        return errors::DataLoss("CollectField: Failed reading packed size");
+        return absl::DataLossError("CollectField: Failed reading packed size");
       }
-      Status st = collector->ReadPackedValues(input, field, length);
-      if (!st.ok()) {
-        return st;
-      }
-      return Status::OK();
+      return collector->ReadPackedValues(input, field, length);
     }
 
     // Read ordinary values, including strings, bytes, and messages.
     if (wire_type != schema_wire_type) {
       if (!WireFormatLite::SkipField(
               input, WireFormatLite::MakeTag(field.number, wire_type))) {
-        return errors::DataLoss(
+        return absl::DataLossError(
             "CollectField: Failed skipping malformed field");
       }
-      return Status::OK();
+      return absl::OkStatus();
     }
     return collector->ReadValue(input, field);
   }
 
-  string message_type_;
-  // Note that fields are sorted by increasing field number,
-  // which is not in general the order given by the user-specified
-  // field_names and output_types Op attributes.
+  std::string message_type_;
+  // Note that fields are sorted by increasing field number, which is not in
+  // general the order given by the user-specified field_names and output_types
+  // Op attributes.
   std::vector<std::unique_ptr<const FieldInfo>> fields_;
 
   // Owned_desc_pool_ is null when using descriptor_source=local.
@@ -1131,15 +1116,16 @@ class DecodeProtoOp : public OpKernel {
   // True if decoding binary format, false if decoding text format.
   bool is_binary_;
 
-  // True if the protos should be sanitized before parsing.
-  // Enables the initial protobuf sanitizer, which is much
-  // more expensive than the decoder. The flag defaults to true
-  // but can be set to false for trusted sources.
-  // TODO(nix): flip the default to false when the fast decoder
-  // has passed security review.
+  // True if the protos should be sanitized before parsing. Enables the initial
+  // protobuf sanitizer, which is much more expensive than the decoder. The flag
+  // defaults to true but can be set to false for trusted sources.
+  //
+  // TODO(nix): Flip the default to false when the fast decoder has passed
+  // security review.
   bool sanitize_;
 
-  TF_DISALLOW_COPY_AND_ASSIGN(DecodeProtoOp);
+  DecodeProtoOp(const DecodeProtoOp&) = delete;
+  void operator=(const DecodeProtoOp&) = delete;
 };
 
 REGISTER_KERNEL_BUILDER(Name("DecodeProtoV2").Device(DEVICE_CPU),

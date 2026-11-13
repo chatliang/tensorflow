@@ -16,9 +16,15 @@ limitations under the License.
 #ifndef TENSORFLOW_CORE_GRAPPLER_COSTS_COST_ESTIMATOR_H_
 #define TENSORFLOW_CORE_GRAPPLER_COSTS_COST_ESTIMATOR_H_
 
-#include <chrono>
+#include <cmath>
+#include <limits>
+#include <string>
 #include <unordered_map>
+
+#include "absl/container/flat_hash_map.h"
+#include "absl/container/flat_hash_set.h"
 #include "tensorflow/core/lib/core/status.h"
+#include "tensorflow/core/protobuf/config.pb.h"
 
 namespace tensorflow {
 class GraphDef;
@@ -27,8 +33,42 @@ class CostGraphDef;
 namespace grappler {
 struct GrapplerItem;
 
-constexpr int64 kMemoryUnknown = -1ll;
-constexpr int64 kZeroMemory = 0ll;
+constexpr uint64_t kMemoryUnknown = std::numeric_limits<uint64_t>::max();
+constexpr uint64_t kZeroMemory = 0ULL;
+
+struct DeviceInfo {
+  // Billions of operations executed per second.
+  double gigaops;
+
+  // Bandwidth to main memory in GB per second.
+  double gb_per_sec;
+
+  // Read bandwidth to intermediate memory in GB per second.
+  double intermediate_read_gb_per_sec;
+
+  // Write bandwidth to intermediate memory in GB per second.
+  double intermediate_write_gb_per_sec;
+
+  DeviceInfo()
+      : gigaops(INFINITY),
+        gb_per_sec(INFINITY),
+        intermediate_read_gb_per_sec(INFINITY),
+        intermediate_write_gb_per_sec(INFINITY) {}
+
+  DeviceInfo(const DeviceInfo& input)
+      : gigaops(input.gigaops),
+        gb_per_sec(input.gb_per_sec),
+        intermediate_read_gb_per_sec(input.intermediate_read_gb_per_sec),
+        intermediate_write_gb_per_sec(input.intermediate_write_gb_per_sec) {}
+
+  DeviceInfo(double gigaops, double gb_per_sec,
+             double intermediate_read_gb_per_sec = INFINITY,
+             double intermediate_write_gb_per_sec = INFINITY)
+      : gigaops(gigaops),
+        gb_per_sec(gb_per_sec),
+        intermediate_read_gb_per_sec(intermediate_read_gb_per_sec),
+        intermediate_write_gb_per_sec(intermediate_write_gb_per_sec) {}
+};
 
 // Holds the set of things we might want to estimate or measure in Grappler.
 // Always produce execution time. Other fields are optional depending on the
@@ -38,11 +78,12 @@ struct Costs {
   inline Costs();
 
   // Builds a Costs structure with all zero values, rather than unknowns.
-  static inline Costs ZeroCosts();
+  static inline Costs ZeroCosts(bool inaccurate = false);
 
   struct MilliSeconds : std::chrono::milliseconds {
     MilliSeconds() : std::chrono::milliseconds(0) {}
-    MilliSeconds(double d) : std::chrono::milliseconds(static_cast<int64>(d)) {}
+    MilliSeconds(double d)
+        : std::chrono::milliseconds(static_cast<int64_t>(d)) {}
     MilliSeconds(const std::chrono::milliseconds& d)
         : std::chrono::milliseconds(d) {}
     MilliSeconds& operator=(const std::chrono::milliseconds& d) {
@@ -52,7 +93,8 @@ struct Costs {
   };
   struct MicroSeconds : std::chrono::microseconds {
     MicroSeconds() : std::chrono::microseconds(0) {}
-    MicroSeconds(double d) : std::chrono::microseconds(static_cast<int64>(d)) {}
+    MicroSeconds(double d)
+        : std::chrono::microseconds(static_cast<int64_t>(d)) {}
     MicroSeconds(const std::chrono::microseconds& d)
         : std::chrono::microseconds(d) {}
     MicroSeconds& operator=(const std::chrono::microseconds& d) {
@@ -65,7 +107,7 @@ struct Costs {
   };
   struct NanoSeconds : std::chrono::nanoseconds {
     NanoSeconds() : std::chrono::nanoseconds(0) {}
-    NanoSeconds(double d) : std::chrono::nanoseconds(static_cast<int64>(d)) {}
+    NanoSeconds(double d) : std::chrono::nanoseconds(static_cast<int64_t>(d)) {}
     NanoSeconds(const std::chrono::nanoseconds& d)
         : std::chrono::nanoseconds(d) {}
     NanoSeconds& operator=(const std::chrono::nanoseconds& d) {
@@ -96,24 +138,59 @@ struct Costs {
   // Memory access cost of running the graph.
   Duration memory_time;
 
+  // HBM read and write cost of running the graph. These are the achieved time
+  // where the HBM bw might haven been derated (from the peak bw). For small
+  // DMAs there is usually high derating, i.e. the achieved HBM bw is smaller
+  // than the peak bw and the achieved time is much larger than the theoretical
+  // roofline time.
+  Duration hbm_read_time;
+  Duration hbm_write_time;
+
+  // HBM read and write cost of running the graph without HBM bw derating. These
+  // are the theoretical roofline HBM time if the peak HBM bw is achieved.
+  Duration hbm_read_time_noderate;
+  Duration hbm_write_time_noderate;
+
+  // Intermediate memory access cost of running the graph
+  Duration intermediate_memory_time;
+  Duration intermediate_memory_read_time;   // Intermediate memory read cost.
+  Duration intermediate_memory_write_time;  // Intermediate memory write cost.
+
+  // Network time (colelctived ops - all gather, all reduce, etc.)
+  Duration network_time;
+
   // This field can be a very pessimistic estimate of the main memory
   // requirements of a graph. For example, it might assume that all activations
   // are live for all of a graph's execution.
-  int64 max_memory;  // Maximum main memory requirement in bytes over all ops.
-  int64 persistent_memory;
-  int64 temporary_memory;
+  uint64_t max_memory;  // Max main memory requirement in bytes over all ops.
+  uint64_t persistent_memory;
+  uint64_t temporary_memory;
+
+  // Output memory usage per port.
+  absl::flat_hash_map<int32_t, int64_t> output_tensor_size_bytes;
+
+  // Track persistent versus temporary memory.
+  absl::flat_hash_set<int32_t> persistent_output_ports;
 
   // These fields are used for TPU-related estimations. They are per-op
   // maximums, so each op is evaluated independently, but we want the maximum of
   // the value over all ops.
-  int64 max_per_op_buffers;    // Sum of all buffers used by the ops.
-  int64 max_per_op_streaming;  // Ignore largest input buffer, assuming it
-                               // streams from main memory.
+  int64_t max_per_op_buffers;    // Sum of all buffers used by the ops.
+  int64_t max_per_op_streaming;  // Ignore largest input buffer, assuming it
+                                 // streams from main memory.
+
+  // Number of ops included in this Costs in total.
+  // Default initialized to be one.
+  int64_t num_ops_total = 1;
   // If the time estimation is inaccurate.
   bool inaccurate = false;
+  // Number of ops that are estimated with unknown shapes.
+  int64_t num_ops_with_unknown_shapes = 0;
+  // TODO(pcma): include a counter for total inaccurate ops and counters for
+  // other reasons causing the inaccuracy
 
   // Max possible memory usage per device.
-  std::unordered_map<string, uint64> estimated_max_memory_per_device;
+  std::unordered_map<std::string, uint64_t> estimated_max_memory_per_device;
 };
 
 inline std::ostream& operator<<(std::ostream& os, const Costs::MilliSeconds d) {
@@ -133,6 +210,8 @@ Costs::Costs() {
   execution_time = Duration::zero();
   compute_time = Duration::zero();
   memory_time = Duration::zero();
+  intermediate_memory_time = Duration::zero();
+  network_time = Duration::zero();
   max_memory = kMemoryUnknown;
   persistent_memory = kMemoryUnknown;
   temporary_memory = kMemoryUnknown;
@@ -140,18 +219,27 @@ Costs::Costs() {
   max_per_op_streaming = kMemoryUnknown;
 }
 
-Costs Costs::ZeroCosts() {
+Costs Costs::ZeroCosts(bool inaccurate) {
   Costs costs;
   costs.execution_time = Duration::zero();
   costs.compute_time = Duration::zero();
   costs.memory_time = Duration::zero();
+  costs.intermediate_memory_time = Duration::zero();
+  costs.network_time = Duration::zero();
   costs.max_memory = kZeroMemory;
   costs.persistent_memory = kZeroMemory;
   costs.temporary_memory = kZeroMemory;
   costs.max_per_op_buffers = kZeroMemory;
   costs.max_per_op_streaming = kZeroMemory;
+  costs.inaccurate = inaccurate;
   return costs;
 }
+
+Costs CombineCosts(const Costs& left, const Costs& right);
+
+// Multiplies Costs by a scalar.
+// Equivalent to applying CombineCosts "multiplier" times.
+Costs MultiplyCosts(const Costs& costs, int multiplier);
 
 // Given a GrapperItem and an optimized implementation of the corresponding
 // TensorFlow graph, the CostEstimator attempts to predicts the actual cost of
@@ -163,18 +251,19 @@ class CostEstimator {
   // Initializes the estimator for the specified grappler item.
   // The estimator shouldn't be used if this function returns any status other
   // that OK.
-  virtual Status Initialize(const GrapplerItem& item) = 0;
+  virtual absl::Status Initialize(const GrapplerItem& item) = 0;
 
   // Predicts the cost of running the given optimized version of the grappler
   // item.
-  // If a CostGraphDef is passed, it will be populated with detailed information
+  // If a RunMetadata is passed, it will be populated with detailed information
   // about the cost of running each operation of the optimized graph.
   // if a double value is passed, it will be set to a value that reflects the
   // overall cost of running the graph (e.g. the latency of the computation).
   // Returns a status that indicate is the performance could be estimated or
   // not.
-  virtual Status PredictCosts(const GraphDef& optimized_graph,
-                              CostGraphDef* cost_graph, Costs* cost) const = 0;
+  virtual absl::Status PredictCosts(const GraphDef& optimized_graph,
+                                    RunMetadata* run_metadata,
+                                    Costs* cost) const = 0;
 };
 
 }  // end namespace grappler

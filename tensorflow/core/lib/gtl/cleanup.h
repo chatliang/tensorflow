@@ -19,7 +19,7 @@ limitations under the License.
 // need more sophisticated syntax than that.
 //
 // Example:
-//   void func() {}
+//   void func() {
 //     FILE* fp = fopen("data.txt", "r");
 //     if (fp == nullptr) return;
 //     auto fp_cleaner = gtl::MakeCleanup([fp] { fclose(fp); });
@@ -39,8 +39,8 @@ limitations under the License.
 //
 // You can call 'release()' on a Cleanup object to cancel the cleanup.
 
-#ifndef TENSORFLOW_LIB_GTL_CLEANUP_H_
-#define TENSORFLOW_LIB_GTL_CLEANUP_H_
+#ifndef TENSORFLOW_CORE_LIB_GTL_CLEANUP_H_
+#define TENSORFLOW_CORE_LIB_GTL_CLEANUP_H_
 
 #include <type_traits>
 #include <utility>
@@ -95,14 +95,14 @@ class Cleanup {
   bool is_released() const { return released_; }
 
  private:
-  static_assert(!std::is_reference<F>::value, "F must not be a reference");
+  static_assert(!std::is_reference_v<F>, "F must not be a reference");
 
   bool released_ = false;
   F f_;
 };
 
 template <int&... ExplicitParameterBarrier, typename F,
-          typename DecayF = typename std::decay<F>::type>
+          typename DecayF = std::decay_t<F>>
 TF_MUST_USE_RESULT Cleanup<DecayF> MakeCleanup(F&& f) {
   return Cleanup<DecayF>(std::forward<F>(f));
 }
@@ -110,4 +110,4 @@ TF_MUST_USE_RESULT Cleanup<DecayF> MakeCleanup(F&& f) {
 }  // namespace gtl
 }  // namespace tensorflow
 
-#endif  // TENSORFLOW_LIB_GTL_CLEANUP_H_
+#endif  // TENSORFLOW_CORE_LIB_GTL_CLEANUP_H_

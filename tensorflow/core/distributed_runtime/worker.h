@@ -20,15 +20,16 @@ limitations under the License.
 
 #include "tensorflow/core/distributed_runtime/graph_mgr.h"
 #include "tensorflow/core/distributed_runtime/partial_run_mgr.h"
+#include "tensorflow/core/distributed_runtime/recent_request_ids.h"
 #include "tensorflow/core/distributed_runtime/session_mgr.h"
 #include "tensorflow/core/distributed_runtime/worker_interface.h"
+#include "tensorflow/core/framework/cancellation.h"
 
 namespace tensorflow {
 
-class CancellationManager;
 class Device;
 struct WorkerEnv;
-struct WorkerSession;
+class WorkerSession;
 
 // A TensorFlow Worker runs registered graphs and supports worker-to-worker
 // Tensor transfer.
@@ -42,10 +43,10 @@ struct WorkerSession;
 class Worker : public WorkerInterface {
  public:
   Worker(WorkerEnv* env);
-  virtual ~Worker() {}
+  ~Worker() override {}
 
-  void GetStatusAsync(const GetStatusRequest* request,
-                      GetStatusResponse* response,
+  void GetStatusAsync(CallOptions* opts, const GetStatusRequest* request,
+                      GetStatusResponse* response, bool fail_fast,
                       StatusCallback done) override;
 
   void CreateWorkerSessionAsync(const CreateWorkerSessionRequest* request,
@@ -109,20 +110,21 @@ class Worker : public WorkerInterface {
 
  protected:
   WorkerEnv* const env_;  // Not owned.
+  RecentRequestIds recent_request_ids_;
 
-  Status PrepareRecvTensor(const Rendezvous::ParsedKey& parsed,
-                           Device** src_dev);
+  absl::Status PrepareRecvTensor(const Rendezvous::ParsedKey& parsed,
+                                 Device** src_dev);
 
-  void AbortStep(int64);
+  void AbortStep(int64_t);
 
  private:
   PartialRunMgr partial_run_mgr_;
 
   CancellationManager cancellation_manager_;
 
-  Status PrepareRunGraph(RunGraphRequestWrapper* req,
-                         GraphMgr::NamedTensors* in,
-                         GraphMgr::NamedTensors* out);
+  absl::Status PrepareRunGraph(RunGraphRequestWrapper* req,
+                               GraphMgr::NamedTensors* in,
+                               GraphMgr::NamedTensors* out);
 
   void DoRunGraph(CallOptions* opts, RunGraphRequestWrapper* request,
                   MutableRunGraphResponseWrapper* response,
@@ -132,7 +134,8 @@ class Worker : public WorkerInterface {
                          MutableRunGraphResponseWrapper* response,
                          StatusCallback done);
 
-  TF_DISALLOW_COPY_AND_ASSIGN(Worker);
+  Worker(const Worker&) = delete;
+  void operator=(const Worker&) = delete;
 };
 
 }  // namespace tensorflow

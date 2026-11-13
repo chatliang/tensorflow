@@ -13,21 +13,30 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
+#include "tensorflow/java/src/gen/cc/op_generator.h"
+
 #include <list>
 #include <map>
 #include <memory>
 #include <set>
+#include <sstream>
 #include <string>
+#include <utility>
 #include <vector>
 
+#include "absl/status/status.h"
+#include "absl/strings/ascii.h"
+#include "xla/tsl/platform/status.h"
+#include "tensorflow/core/framework/api_def.pb.h"
+#include "tensorflow/core/framework/op_def.pb.h"
 #include "tensorflow/core/framework/op_gen_lib.h"
-#include "tensorflow/core/lib/core/errors.h"
-#include "tensorflow/core/lib/io/path.h"
 #include "tensorflow/core/lib/strings/str_util.h"
 #include "tensorflow/core/platform/env.h"
+#include "tensorflow/core/platform/file_system.h"
 #include "tensorflow/core/platform/logging.h"
+#include "tensorflow/core/platform/path.h"
+#include "tensorflow/core/platform/status.h"
 #include "tensorflow/java/src/gen/cc/java_defs.h"
-#include "tensorflow/java/src/gen/cc/op_generator.h"
 #include "tensorflow/java/src/gen/cc/op_specs.h"
 #include "tensorflow/java/src/gen/cc/source_writer.h"
 
@@ -36,20 +45,21 @@ namespace java {
 namespace {
 
 constexpr const char kLicense[] =
-  "/* Copyright 2018 The TensorFlow Authors. All Rights Reserved.\n"
-  "\n"
-  "Licensed under the Apache License, Version 2.0 (the \"License\");\n"
-  "you may not use this file except in compliance with the License.\n"
-  "You may obtain a copy of the License at\n"
-  "\n"
-  "    http://www.apache.org/licenses/LICENSE-2.0\n"
-  "\n"
-  "Unless required by applicable law or agreed to in writing, software\n"
-  "distributed under the License is distributed on an \"AS IS\" BASIS,\n"
-  "WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.\n"
-  "See the License for the specific language governing permissions and\n"
-  "limitations under the License.\n"
-  "=======================================================================*/\n";
+    "/* Copyright 2018 The TensorFlow Authors. All Rights Reserved.\n"
+    "\n"
+    "Licensed under the Apache License, Version 2.0 (the \"License\");\n"
+    "you may not use this file except in compliance with the License.\n"
+    "You may obtain a copy of the License at\n"
+    "\n"
+    "    http://www.apache.org/licenses/LICENSE-2.0\n"
+    "\n"
+    "Unless required by applicable law or agreed to in writing, software\n"
+    "distributed under the License is distributed on an \"AS IS\" BASIS,\n"
+    "WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.\n"
+    "See the License for the specific language governing permissions and\n"
+    "limitations under the License.\n"
+    "=======================================================================*/"
+    "\n";
 
 // There is three different modes to render an op class, depending on the
 // number and type of outputs it has:
@@ -66,7 +76,7 @@ constexpr const char kLicense[] =
 //
 enum RenderMode { DEFAULT, OPERAND, LIST_OPERAND };
 
-void AddArgument(const Variable& var, const string& description,
+void AddArgument(const Variable& var, const std::string& description,
                  Method* method_out, Javadoc* javadoc_out) {
   method_out->add_argument(var);
   javadoc_out->add_param_tag(var.name(), description);
@@ -99,6 +109,10 @@ void CollectOpDependencies(const OpSpec& op, RenderMode mode,
   for (const AttributeSpec& attribute : op.attributes()) {
     out->push_back(attribute.var().type());
     out->push_back(attribute.jni_type());
+    if (attribute.has_default_value() &&
+        attribute.type().kind() == Type::GENERIC) {
+      out->push_back(Type::ForDataType(attribute.default_value()->type()));
+    }
   }
   for (const AttributeSpec& optional_attribute : op.optional_attributes()) {
     out->push_back(optional_attribute.var().type());
@@ -107,9 +121,10 @@ void CollectOpDependencies(const OpSpec& op, RenderMode mode,
 
 void WriteSetAttrDirective(const AttributeSpec& attr, bool optional,
                            SourceWriter* writer) {
-  string var_name = optional ? "opts." + attr.var().name() : attr.var().name();
+  std::string var_name =
+      optional ? "opts." + attr.var().name() : attr.var().name();
   if (attr.iterable()) {
-    string array_name = attr.var().name() + "Array";
+    std::string array_name = attr.var().name() + "Array";
     writer->AppendType(attr.jni_type())
         .Append("[] " + array_name + " = new ")
         .AppendType(attr.jni_type())
@@ -138,20 +153,82 @@ void WriteSetAttrDirective(const AttributeSpec& attr, bool optional,
   }
 }
 
+void RenderSecondaryFactoryMethod(const OpSpec& op, const Type& op_class,
+                                  std::map<std::string, Type> default_types,
+                                  SourceWriter* writer) {
+  // Build the return type for the secondary factory, replacing generic
+  // parameters with their default value if any
+  Type return_type = Type::Class(op_class.name(), op_class.package());
+  for (const Type& parameter : op_class.parameters()) {
+    if (parameter.kind() == Type::GENERIC &&
+        default_types.find(parameter.name()) != default_types.end()) {
+      return_type.add_parameter(default_types.at(parameter.name()));
+    } else {
+      return_type.add_parameter(parameter);
+    }
+  }
+  Method factory = Method::Create("create", return_type);
+  Javadoc factory_doc = Javadoc::Create(
+      "Factory method to create a class wrapping a new " + op_class.name() +
+      " operation using default output types.");
+  Variable scope =
+      Variable::Create("scope", Type::Class("Scope", "org.tensorflow.op"));
+  AddArgument(scope, "current scope", &factory, &factory_doc);
+  std::stringstream factory_statement;
+  factory_statement << "return create(scope";
+  for (const ArgumentSpec& input : op.inputs()) {
+    AddArgument(input.var(), input.description(), &factory, &factory_doc);
+    factory_statement << ", " << input.var().name();
+  }
+  for (const AttributeSpec& attr : op.attributes()) {
+    // Only add attributes that are not types or have no default value to the
+    // signature of the secondary factory
+    factory_statement << ", ";
+    if (attr.type().kind() == Type::GENERIC &&
+        default_types.find(attr.type().name()) != default_types.end()) {
+      factory_statement << default_types.at(attr.type().name()).name()
+                        << ".class";
+    } else {
+      AddArgument(attr.var(), attr.description(), &factory, &factory_doc);
+      factory_statement << attr.var().name();
+    }
+  }
+  if (!op.optional_attributes().empty()) {
+    Variable options_var = Variable::Varargs("options", Type::Class("Options"));
+    AddArgument(options_var, "carries optional attributes values", &factory,
+                &factory_doc);
+    factory_statement << ", " << options_var.name();
+  }
+  factory_doc.add_tag("return", "a new instance of " + op_class.name());
+
+  writer->BeginMethod(factory, PUBLIC | STATIC, &factory_doc);
+  writer->Append(factory_statement.str()).Append(");").EndLine();
+  writer->EndMethod();
+}
+
 void RenderFactoryMethods(const OpSpec& op, const Type& op_class,
                           SourceWriter* writer) {
   Method factory = Method::Create("create", op_class);
   Javadoc factory_doc =
-      Javadoc::Create("Factory method to create a class to wrap a new " +
-                      op_class.name() + " operation to the graph.");
+      Javadoc::Create("Factory method to create a class wrapping a new " +
+                      op_class.name() + " operation.");
   Variable scope =
       Variable::Create("scope", Type::Class("Scope", "org.tensorflow.op"));
-  AddArgument(scope, "current graph scope", &factory, &factory_doc);
+  AddArgument(scope, "current scope", &factory, &factory_doc);
   for (const ArgumentSpec& input : op.inputs()) {
     AddArgument(input.var(), input.description(), &factory, &factory_doc);
   }
+  std::map<std::string, Type> default_types;
   for (const AttributeSpec& attr : op.attributes()) {
     AddArgument(attr.var(), attr.description(), &factory, &factory_doc);
+    // If this attribute is a type with a default value, save its value
+    // for passing it implicitly in a secondary factory method
+    if (attr.has_default_value() && attr.type().kind() == Type::GENERIC) {
+      Type default_type = Type::ForDataType(attr.default_value()->type());
+      if (!default_type.wildcard()) {
+        default_types.insert(std::make_pair(attr.type().name(), default_type));
+      }
+    }
   }
   if (!op.optional_attributes().empty()) {
     AddArgument(Variable::Varargs("options", Type::Class("Options")),
@@ -160,7 +237,7 @@ void RenderFactoryMethods(const OpSpec& op, const Type& op_class,
   factory_doc.add_tag("return", "a new instance of " + op_class.name());
 
   writer->BeginMethod(factory, PUBLIC | STATIC, &factory_doc);
-  writer->Append("OperationBuilder opBuilder = scope.graph().opBuilder(\"" +
+  writer->Append("OperationBuilder opBuilder = scope.env().opBuilder(\"" +
                  op.graph_op_name() + "\", scope.makeOpName(\"" +
                  op_class.name() + "\"));");
   writer->EndLine();
@@ -175,6 +252,10 @@ void RenderFactoryMethods(const OpSpec& op, const Type& op_class,
       writer->EndLine();
     }
   }
+  // Add control dependencies, if any.
+  writer->Append("opBuilder = scope.applyControlDependencies(opBuilder);");
+  writer->EndLine();
+
   for (const AttributeSpec& attribute : op.attributes()) {
     WriteSetAttrDirective(attribute, false, writer);
   }
@@ -193,6 +274,12 @@ void RenderFactoryMethods(const OpSpec& op, const Type& op_class,
       .Append("(opBuilder.build());")
       .EndLine();
   writer->EndMethod();
+
+  // If this operation has type attributes with a default value, create a
+  // second factory method that infers those values implicitly
+  if (!default_types.empty()) {
+    RenderSecondaryFactoryMethod(op, op_class, default_types, writer);
+  }
 }
 
 void RenderConstructor(const OpSpec& op, const Type& op_class,
@@ -214,7 +301,7 @@ void RenderConstructor(const OpSpec& op, const Type& op_class,
     writer->Append("int outputIdx = 0;").EndLine();
     for (const ArgumentSpec& output : op.outputs()) {
       if (output.iterable()) {
-        string var_length = output.var().name() + "Length";
+        std::string var_length = output.var().name() + "Length";
         writer->Append("int " + var_length)
             .Append(" = operation.outputListLength(\"" + output.op_def_name() +
                     "\");")
@@ -332,14 +419,15 @@ void RenderOptionsClass(const OpSpec& op, const Type& op_class,
   writer->EndType();
 }
 
-inline Type ClassOf(const EndpointSpec& endpoint, const string& base_package) {
+inline Type ClassOf(const EndpointSpec& endpoint,
+                    const std::string& base_package) {
   return Type::Class(
       endpoint.name(),
-      base_package + "." + str_util::Lowercase(endpoint.package()));
+      base_package + "." + absl::AsciiStrToLower(endpoint.package()));
 }
 
 void GenerateOp(const OpSpec& op, const EndpointSpec& endpoint,
-                const string& base_package, const string& output_dir,
+                const std::string& base_package, const std::string& output_dir,
                 Env* env) {
   Type op_class(
       ClassOf(endpoint, base_package)
@@ -363,7 +451,7 @@ void GenerateOp(const OpSpec& op, const EndpointSpec& endpoint,
     }
   }
   // op generic parameters
-  std::set<string> generics;
+  std::set<std::string> generics;
   for (const ArgumentSpec& output : op.outputs()) {
     if (output.type().kind() == Type::GENERIC && !output.type().wildcard() &&
         generics.find(output.type().name()) == generics.end()) {
@@ -377,7 +465,7 @@ void GenerateOp(const OpSpec& op, const EndpointSpec& endpoint,
   // op annotations
   if (endpoint.deprecated()) {
     op_class.add_annotation(Annotation::Create("Deprecated"));
-    string explanation;
+    std::string explanation;
     if (!op.endpoints().front().deprecated()) {
       explanation =
           "use {@link " +
@@ -398,13 +486,13 @@ void GenerateOp(const OpSpec& op, const EndpointSpec& endpoint,
     op_class.add_annotation(oper_annot);
   }
   // create op class file
-  const string op_dir_name = io::JoinPath(
+  const std::string op_dir_name = io::JoinPath(
       output_dir, str_util::StringReplace(op_class.package(), ".", "/", true));
   if (!env->FileExists(op_dir_name).ok()) {
     TF_CHECK_OK(Env::Default()->RecursivelyCreateDir(op_dir_name))
         << op_dir_name;
   }
-  const string op_file_name = op_class.name() + ".java";
+  const std::string op_file_name = op_class.name() + ".java";
   std::unique_ptr<tensorflow::WritableFile> op_file;
   TF_CHECK_OK(
       env->NewWritableFile(io::JoinPath(op_dir_name, op_file_name), &op_file))
@@ -441,7 +529,7 @@ bool CanGenerateOp(const OpDef& op_def, const ApiDef& api_def) {
     return false;
   }
   for (const auto& attr : op_def.attr()) {
-    if (attr.type() == "func") {
+    if (attr.type() == "func" || attr.type() == "list(func)") {
       return false;  // TODO(karllessard) add support for function attributes
     }
   }
@@ -450,8 +538,9 @@ bool CanGenerateOp(const OpDef& op_def, const ApiDef& api_def) {
 
 }  // namespace
 
-Status OpGenerator::Run(const OpList& op_list, const string& base_package,
-                        const string& output_dir) {
+absl::Status OpGenerator::Run(const OpList& op_list,
+                              const std::string& base_package,
+                              const std::string& output_dir) {
   ApiDefMap api_map(op_list);
   if (!api_dirs_.empty()) {
     // Only load api files that correspond to the requested "op_list"
@@ -476,7 +565,7 @@ Status OpGenerator::Run(const OpList& op_list, const string& base_package,
       }
     }
   }
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 }  // namespace java

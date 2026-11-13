@@ -14,7 +14,11 @@ limitations under the License.
 ==============================================================================*/
 
 #include "tensorflow/core/grappler/utils/grappler_test.h"
+
 #include <memory>
+
+#include "absl/algorithm/container.h"
+#include "tensorflow/core/framework/attr_value_util.h"
 #include "tensorflow/core/grappler/utils.h"
 #include "tensorflow/core/lib/core/status.h"
 #include "tensorflow/core/protobuf/rewriter_config.pb.h"
@@ -23,30 +27,95 @@ limitations under the License.
 namespace tensorflow {
 namespace grappler {
 
+namespace {
+void CompareGraphNodes(protobuf::RepeatedPtrField<NodeDef>* want,
+                       protobuf::RepeatedPtrField<NodeDef>* got) {
+  auto comparator = [](const NodeDef& n1, const NodeDef& n2) -> bool {
+    return n1.name() < n2.name();
+  };
+
+  std::sort(want->begin(), want->end(), comparator);
+  std::sort(got->begin(), got->end(), comparator);
+
+  ASSERT_EQ(want->size(), got->size());
+
+  for (int i = 0; i < want->size(); ++i) {
+    NodeDef& want_node = (*want)[i];
+    NodeDef& got_node = (*got)[i];
+
+    EXPECT_EQ(want_node.op(), got_node.op());
+    EXPECT_EQ(want_node.name(), got_node.name());
+    EXPECT_EQ(want_node.device(), got_node.device());
+    ASSERT_EQ(want_node.input_size(), got_node.input_size())
+        << "want_node =\n"
+        << want_node.DebugString() << "\ngot_node =\n"
+        << got_node.DebugString();
+
+    // Order of control dependencies doesn't matter, so we sort them first.
+    const auto is_control = [](const std::string& input) -> bool {
+      return ParseTensorName(input).index() < 0;
+    };
+
+    auto want_inputs = want_node.mutable_input();
+    auto got_inputs = got_node.mutable_input();
+    std::sort(absl::c_find_if(*want_inputs, is_control), want_inputs->end());
+    std::sort(absl::c_find_if(*got_inputs, is_control), got_inputs->end());
+
+    for (int j = 0; j < want_node.input_size(); ++j) {
+      const TensorId want_tensor = ParseTensorName(want_node.input(j));
+      const TensorId got_tensor = ParseTensorName(got_node.input(j));
+      EXPECT_EQ(want_tensor.ToString(), got_tensor.ToString());
+    }
+  }
+}
+
+void SetAllOptimizers(RewriterConfig* cfg, RewriterConfig::Toggle value) {
+  cfg->set_arithmetic_optimization(value);
+  cfg->set_auto_mixed_precision(value);
+  cfg->set_auto_mixed_precision_onednn_bfloat16(value);
+  cfg->set_common_subgraph_elimination(value);
+  cfg->set_constant_folding(value);
+  cfg->set_debug_stripper(value);
+  cfg->set_dependency_optimization(value);
+  cfg->set_function_optimization(value);
+  cfg->set_implementation_selector(value);
+  cfg->set_layout_optimizer(value);
+  cfg->set_loop_optimization(value);
+  cfg->set_pin_to_host_optimization(value);
+  cfg->set_remapping(value);
+  cfg->set_scoped_allocator_optimization(value);
+  cfg->set_shape_optimization(value);
+}
+}  // namespace
+
 GrapplerTest::GrapplerTest() {
   // Turn off all the automatic optimizations to ensure that we run the graph
-  // exactly as it is given to us. This ensures that we can compare the results
-  // before and after manual optimization, without any of the automatic
-  // optimizations interfering in the comparison.
-  RewriterConfig* cfg =
-      options_.config.mutable_graph_options()->mutable_rewrite_options();
-  cfg->set_constant_folding(RewriterConfig::OFF);
-  cfg->set_arithmetic_optimization(RewriterConfig::OFF);
-  cfg->set_dependency_optimization(RewriterConfig::OFF);
-  cfg->set_loop_optimization(RewriterConfig::OFF);
-  cfg->set_function_optimization(RewriterConfig::OFF);
-  cfg->set_layout_optimizer(RewriterConfig::OFF);
-  cfg->set_debug_stripper(RewriterConfig::OFF);
+  // exactly as it is given to us. This ensures that we can compare the
+  // results before and after manual optimization, without any of the
+  // automatic optimizations interfering in the comparison.
+  DisableAllOptimizers();
+}
+
+void GrapplerTest::DisableAllOptimizers() {
+  SetAllOptimizers(
+      options_.config.mutable_graph_options()->mutable_rewrite_options(),
+      RewriterConfig::OFF);
+}
+
+void GrapplerTest::EnableAllOptimizers() {
+  SetAllOptimizers(
+      options_.config.mutable_graph_options()->mutable_rewrite_options(),
+      RewriterConfig::ON);
 }
 
 std::vector<Tensor> GrapplerTest::EvaluateNodes(
-    const GraphDef& graph, const std::vector<string>& node_names) const {
+    const GraphDef& graph, const std::vector<std::string>& node_names) const {
   return EvaluateNodes(graph, node_names, {});
 }
 
 std::vector<Tensor> GrapplerTest::EvaluateNodes(
-    const GraphDef& graph, const std::vector<string>& node_names,
-    const std::vector<std::pair<string, Tensor>>& inputs) const {
+    const GraphDef& graph, const std::vector<std::string>& node_names,
+    const std::vector<std::pair<std::string, Tensor>>& inputs) const {
   std::unique_ptr<tensorflow::Session> session(NewSession(options_));
   TF_CHECK_OK(session->Create(graph));
   RunOptions run_options;
@@ -75,13 +144,14 @@ std::vector<Tensor> GrapplerTest::EvaluateFetchNodes(
 }
 
 NodeDef* GrapplerTest::AddNode(
-    const string& name, const string& op, const std::vector<string>& inputs,
-    const std::vector<std::pair<string, AttrValue>>& attributes,
+    const std::string& name, const std::string& op,
+    const std::vector<std::string>& inputs,
+    const std::vector<std::pair<std::string, AttrValue>>& attributes,
     GraphDef* graph) const {
   NodeDef* node = graph->add_node();
   node->set_name(name);
   node->set_op(op);
-  for (const string& input : inputs) {
+  for (const std::string& input : inputs) {
     node->add_input(input);
   }
   for (auto attr : attributes) {
@@ -91,36 +161,44 @@ NodeDef* GrapplerTest::AddNode(
 }
 
 void GrapplerTest::CompareGraphs(GraphDef want, GraphDef got) const {
-  auto comparator = [](const NodeDef& n1, const NodeDef& n2) -> bool {
-    return n1.name() < n2.name();
-  };
-  std::sort(want.mutable_node()->begin(), want.mutable_node()->end(),
-            comparator);
-  std::sort(got.mutable_node()->begin(), got.mutable_node()->end(), comparator);
+  CompareGraphNodes(want.mutable_node(), got.mutable_node());
+}
 
-  for (int i = 0; i < want.node_size(); ++i) {
-    std::sort(want.mutable_node(i)->mutable_input()->begin(),
-              want.mutable_node(i)->mutable_input()->end());
-  }
-  for (int i = 0; i < got.node_size(); ++i) {
-    std::sort(got.mutable_node(i)->mutable_input()->begin(),
-              got.mutable_node(i)->mutable_input()->end());
-  }
+void GrapplerTest::CompareFunctions(FunctionDef want, FunctionDef got) const {
+  CompareGraphNodes(want.mutable_node_def(), got.mutable_node_def());
+}
 
-  ASSERT_EQ(want.node_size(), got.node_size());
-  for (int i = 0; i < want.node_size(); ++i) {
-    EXPECT_EQ(want.node(i).op(), got.node(i).op());
-    EXPECT_EQ(want.node(i).name(), got.node(i).name());
-    ASSERT_EQ(want.node(i).input_size(), got.node(i).input_size());
-    for (int j = 0; j < want.node(i).input_size(); ++j) {
-      EXPECT_TRUE(IsSameInput(want.node(i).input(j), got.node(i).input(j)));
-    }
+void GrapplerTest::CompareNodes(const NodeDef& want, const NodeDef& got) const {
+  EXPECT_EQ(want.name(), got.name());
+  EXPECT_EQ(want.op(), got.op());
+
+  std::vector<std::string> want_inputs(want.input().begin(),
+                                       want.input().end());
+  std::vector<std::string> got_inputs(got.input().begin(), got.input().end());
+  EXPECT_EQ(want_inputs, got_inputs);
+
+  const auto attr_name =
+      [](const std::pair<const std::string, AttrValue>& attr) {
+        return attr.first;
+      };
+
+  std::vector<std::string> want_attrs;
+  std::vector<std::string> got_attrs;
+  absl::c_transform(want.attr(), std::back_inserter(want_attrs), attr_name);
+  absl::c_transform(got.attr(), std::back_inserter(got_attrs), attr_name);
+  absl::c_sort(want_attrs);
+  absl::c_sort(got_attrs);
+  EXPECT_EQ(want_attrs, got_attrs);
+
+  for (const std::string& attr : want_attrs) {
+    EXPECT_TRUE(AreAttrValuesEqual(want.attr().at(attr), got.attr().at(attr)));
   }
 }
 
 bool GrapplerTest::IsNodesDirectlyConnected(const NodeMap& node_map,
-                                            const string& src,
-                                            const string& dst, int position) {
+                                            const std::string& src,
+                                            const std::string& dst,
+                                            int position) {
   const NodeDef* src_node = node_map.GetNode(src);
   const NodeDef* dst_node = node_map.GetNode(dst);
   EXPECT_TRUE(src_node != nullptr) << src << " node not found";
@@ -128,7 +206,7 @@ bool GrapplerTest::IsNodesDirectlyConnected(const NodeMap& node_map,
   return src_node && dst_node && dst_node->input(position) == src_node->name();
 }
 
-int GrapplerTest::CountOpNodes(const GraphDef& graph, const string& op) {
+int GrapplerTest::CountOpNodes(const GraphDef& graph, const std::string& op) {
   return std::count_if(graph.node().begin(), graph.node().end(),
                        [&op](const NodeDef& node) { return node.op() == op; });
 }

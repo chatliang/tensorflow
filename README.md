@@ -1,113 +1,167 @@
 <div align="center">
-  <img src="https://www.tensorflow.org/images/tf_logo_transp.png"><br><br>
+  <img src="https://www.tensorflow.org/images/tf_logo_horizontal.png">
 </div>
 
------------------
+[![Python](https://img.shields.io/pypi/pyversions/tensorflow.svg)](https://badge.fury.io/py/tensorflow)
+[![PyPI](https://badge.fury.io/py/tensorflow.svg)](https://badge.fury.io/py/tensorflow)
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.4724125.svg)](https://doi.org/10.5281/zenodo.4724125)
+[![CII Best Practices](https://bestpractices.coreinfrastructure.org/projects/1486/badge)](https://bestpractices.coreinfrastructure.org/projects/1486)
+[![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/tensorflow/tensorflow/badge)](https://securityscorecards.dev/viewer/?uri=github.com/tensorflow/tensorflow)
+[![Fuzzing Status](https://oss-fuzz-build-logs.storage.googleapis.com/badges/tensorflow.svg)](https://bugs.chromium.org/p/oss-fuzz/issues/list?sort=-opened&can=1&q=proj:tensorflow)
+[![Fuzzing Status](https://oss-fuzz-build-logs.storage.googleapis.com/badges/tensorflow-py.svg)](https://bugs.chromium.org/p/oss-fuzz/issues/list?sort=-opened&can=1&q=proj:tensorflow-py)
+[![OSSRank](https://shields.io/endpoint?url=https://ossrank.com/shield/44)](https://ossrank.com/p/44)
+[![Contributor Covenant](https://img.shields.io/badge/Contributor%20Covenant-v1.4%20adopted-ff69b4.svg)](CODE_OF_CONDUCT.md)
 
+**`Documentation`** |
+------------------- |
+[![Documentation](https://img.shields.io/badge/api-reference-blue.svg)](https://www.tensorflow.org/api_docs/) |
 
-| **`Documentation`** |
-|-----------------|
-| [![Documentation](https://img.shields.io/badge/api-reference-blue.svg)](https://www.tensorflow.org/api_docs/) |
+[TensorFlow](https://www.tensorflow.org/) is an end-to-end open source platform
+for machine learning. It has a comprehensive, flexible ecosystem of
+[tools](https://www.tensorflow.org/resources/tools),
+[libraries](https://www.tensorflow.org/resources/libraries-extensions), and
+[community](https://www.tensorflow.org/community) resources that lets
+researchers push the state-of-the-art in ML and developers easily build and
+deploy ML-powered applications.
 
-**TensorFlow** is an open source software library for numerical computation using
-data flow graphs.  The graph nodes represent mathematical operations, while
-the graph edges represent the multidimensional data arrays (tensors) that flow
-between them.  This flexible architecture enables you to deploy computation to one
-or more CPUs or GPUs in a desktop, server, or mobile device without rewriting
-code.  TensorFlow also includes [TensorBoard](https://www.tensorflow.org/programmers_guide/summaries_and_tensorboard), a data visualization toolkit.
+TensorFlow was originally developed by researchers and engineers working within
+the Machine Intelligence team at Google Brain to conduct research in machine
+learning and neural networks. However, the framework is versatile enough to be
+used in other areas as well.
 
-TensorFlow was originally developed by researchers and engineers
-working on the Google Brain team within Google's Machine Intelligence Research
-organization for the purposes of conducting machine learning and deep neural
-networks research.  The system is general enough to be applicable in a wide
-variety of other domains, as well.
+TensorFlow provides stable [Python](https://www.tensorflow.org/api_docs/python)
+and [C++](https://www.tensorflow.org/api_docs/cc) APIs, as well as a
+non-guaranteed backward compatible API for
+[other languages](https://www.tensorflow.org/api_docs).
 
-Keep up to date with release announcements and security updates by
-subscribing to
+Keep up-to-date with release announcements and security updates by subscribing
+to
 [announce@tensorflow.org](https://groups.google.com/a/tensorflow.org/forum/#!forum/announce).
+See all the [mailing lists](https://www.tensorflow.org/community/forums).
 
-## Installation
-*See [Installing TensorFlow](https://www.tensorflow.org/get_started/os_setup.html) for instructions on how to install our release binaries or how to build from source.*
+## Install
 
-People who are a little more adventurous can also try our nightly binaries:
+See the [TensorFlow install guide](https://www.tensorflow.org/install) for the
+[pip package](https://www.tensorflow.org/install/pip), to
+[enable GPU support](https://www.tensorflow.org/install/gpu), use a
+[Docker container](https://www.tensorflow.org/install/docker), and
+[build from source](https://www.tensorflow.org/install/source).
 
-**Nightly pip packages**
-* We are pleased to announce that TensorFlow now offers nightly pip packages
-under the [tf-nightly](https://pypi.python.org/pypi/tf-nightly) and
-[tf-nightly-gpu](https://pypi.python.org/pypi/tf-nightly-gpu) project on pypi.
-Simply run `pip install tf-nightly` or `pip install tf-nightly-gpu` in a clean
-environment to install the nightly TensorFlow build. We support CPU and GPU
-packages on Linux, Mac, and Windows.
+To install the current release, which includes support for
+[CUDA-enabled GPU cards](https://www.tensorflow.org/install/gpu) *(Ubuntu and
+Windows)*:
 
+```
+ pip install tensorflow
+```
+
+Other devices (DirectX and MacOS-metal) are supported using
+[Device Plugins](https://www.tensorflow.org/install/gpu_plugins#available_devices).
+
+A smaller CPU-only TensorFlow package is also available:
+
+```
+ pip install tensorflow-cpu
+```
+
+To update TensorFlow to the latest version, add the `--upgrade` flag to the
+commands above.
+
+*Nightly binaries are available for testing using the
+[tf-nightly](https://pypi.python.org/pypi/tf-nightly) and
+[tf-nightly-cpu](https://pypi.python.org/pypi/tf-nightly-cpu) packages on PyPI.*
 
 #### *Try your first TensorFlow program*
+
 ```shell
 $ python
 ```
+
 ```python
 >>> import tensorflow as tf
+>>> tf.add(1, 2).numpy()
+3
 >>> hello = tf.constant('Hello, TensorFlow!')
->>> sess = tf.Session()
->>> sess.run(hello)
-'Hello, TensorFlow!'
->>> a = tf.constant(10)
->>> b = tf.constant(32)
->>> sess.run(a + b)
-42
->>> sess.close()
+>>> hello.numpy()
+b'Hello, TensorFlow!'
 ```
-Learn more examples about how to do specific tasks in TensorFlow at the [tutorials page of tensorflow.org](https://www.tensorflow.org/tutorials/).
+
+For more examples, see the
+[TensorFlow Tutorials](https://www.tensorflow.org/tutorials/).
 
 ## Contribution guidelines
 
-**If you want to contribute to TensorFlow, be sure to review the [contribution
-guidelines](CONTRIBUTING.md). This project adheres to TensorFlow's
-[code of conduct](CODE_OF_CONDUCT.md). By participating, you are expected to
+**If you want to contribute to TensorFlow, be sure to review the
+[Contribution Guidelines](CONTRIBUTING.md). This project adheres to TensorFlow's
+[Code of Conduct](CODE_OF_CONDUCT.md). By participating, you are expected to
 uphold this code.**
 
-**We use [GitHub issues](https://github.com/tensorflow/tensorflow/issues) for
-tracking requests and bugs. So please see
-[TensorFlow Discuss](https://groups.google.com/a/tensorflow.org/forum/#!forum/discuss) for general questions
-and discussion, and please direct specific questions to [Stack Overflow](https://stackoverflow.com/questions/tagged/tensorflow).**
+**We use [GitHub Issues](https://github.com/tensorflow/tensorflow/issues) for
+tracking requests and bugs, please see
+[TensorFlow Forum](https://discuss.tensorflow.org/) for general questions and
+discussion, and please direct specific questions to
+[Stack Overflow](https://stackoverflow.com/questions/tagged/tensorflow).**
 
-The TensorFlow project strives to abide by generally accepted best practices in open-source software development:
+The TensorFlow project strives to abide by generally accepted best practices in
+open-source software development.
 
-[![CII Best Practices](https://bestpractices.coreinfrastructure.org/projects/1486/badge)](https://bestpractices.coreinfrastructure.org/projects/1486)
+## Patching guidelines
 
+Follow these steps to patch a specific version of TensorFlow, for example, to
+apply fixes to bugs or security vulnerabilities:
+
+*   Clone the TensorFlow repository and switch to the appropriate branch for
+    your desired version—for example, `r2.8` for version 2.8.
+*   Apply the desired changes (i.e., cherry-pick them) and resolve any code
+    conflicts.
+*   Run TensorFlow tests and ensure they pass.
+*   [Build](https://www.tensorflow.org/install/source) the TensorFlow pip
+    package from source.
 
 ## Continuous build status
 
+You can find more community-supported platforms and configurations in the
+[TensorFlow SIG Build Community Builds Table](https://github.com/tensorflow/build#community-supported-tensorflow-builds).
+
 ### Official Builds
 
-| Build Type      | Status | Artifacts |
-| ---             | ---    | ---       |
-| **Linux CPU**   | ![Status](https://storage.googleapis.com/tensorflow-kokoro-build-badges/ubuntu-cc.png) | [pypi](https://pypi.org/project/tf-nightly/) |
-| **Linux GPU**   | ![Status](https://storage.googleapis.com/tensorflow-kokoro-build-badges/ubuntu-gpu-cc.png) | [pypi](https://pypi.org/project/tf-nightly-gpu/) |
-| **Linux XLA**   | TBA | TBA |
-| **MacOS**       | ![Status](https://storage.googleapis.com/tensorflow-kokoro-build-badges/macos-py2-cc.png) | [pypi](https://pypi.org/project/tf-nightly/) |
-| **Windows CPU** | [![Status](https://ci.tensorflow.org/buildStatus/icon?job=tensorflow-master-win-cmake-py)](https://ci.tensorflow.org/job/tensorflow-master-win-cmake-py) | [pypi](https://pypi.org/project/tf-nightly/) |
-| **Windows GPU** | [![Status](http://ci.tensorflow.org/job/tf-master-win-gpu-cmake/badge/icon)](http://ci.tensorflow.org/job/tf-master-win-gpu-cmake/) | [pypi](https://pypi.org/project/tf-nightly-gpu/) |
-| **Android**     | [![Status](https://ci.tensorflow.org/buildStatus/icon?job=tensorflow-master-android)](https://ci.tensorflow.org/job/tensorflow-master-android) | [![Download](https://api.bintray.com/packages/google/tensorflow/tensorflow/images/download.svg)](https://bintray.com/google/tensorflow/tensorflow/_latestVersion) [demo APK](https://ci.tensorflow.org/view/Nightly/job/nightly-android/lastSuccessfulBuild/artifact/out/tensorflow_demo.apk), [native libs](https://ci.tensorflow.org/view/Nightly/job/nightly-android/lastSuccessfulBuild/artifact/out/native/) [build history](https://ci.tensorflow.org/view/Nightly/job/nightly-android/) |
+Build Type               | Artifacts
+------------------------ | ---------
+**Linux CPU**            | [PyPI](https://pypi.org/project/tf-nightly/)
+**Linux GPU**            | [PyPI](https://pypi.org/project/tf-nightly/)
+**Linux XLA**            | TBA
+**macOS**                | [PyPI](https://pypi.org/project/tf-nightly/)
+**Windows CPU**          | [PyPI](https://pypi.org/project/tf-nightly/)
+**Windows GPU**          | [PyPI](https://pypi.org/project/tf-nightly/)
+**Android**              | [LiteRT](https://www.tensorflow.org/lite/guide/android)
+**Raspberry Pi 0 and 1** | [Py3](https://storage.googleapis.com/tensorflow-nightly/tensorflow-1.10.0-cp34-none-linux_armv6l.whl)
+**Raspberry Pi 2 and 3** | [Py3](https://storage.googleapis.com/tensorflow-nightly/tensorflow-1.10.0-cp34-none-linux_armv7l.whl)
 
+## Resources
 
-### Community Supported Builds
+*   [TensorFlow.org](https://www.tensorflow.org)
+*   [TensorFlow Tutorials](https://www.tensorflow.org/tutorials/)
+*   [TensorFlow Official Models](https://github.com/tensorflow/models/tree/master/official)
+*   [TensorFlow Examples](https://github.com/tensorflow/examples)
+*   [TensorFlow Codelabs](https://codelabs.developers.google.com/?cat=TensorFlow)
+*   [TensorFlow Blog](https://blog.tensorflow.org)
+*   [Learn ML with TensorFlow](https://www.tensorflow.org/resources/learn-ml)
+*   [TensorFlow Twitter](https://twitter.com/tensorflow)
+*   [TensorFlow YouTube](https://www.youtube.com/channel/UC0rqucBdTuFTjJiefW5t-IQ)
+*   [TensorFlow model optimization roadmap](https://www.tensorflow.org/model_optimization/guide/roadmap)
+*   [TensorFlow White Papers](https://www.tensorflow.org/about/bib)
+*   [TensorBoard Visualization Toolkit](https://github.com/tensorflow/tensorboard)
+*   [TensorFlow Code Search](https://cs.opensource.google/tensorflow/tensorflow)
 
-| Build Type      | Status | Artifacts |
-| ---             | ---    | ---       |
-| **IBM s390x**       | [![Build Status](http://ibmz-ci.osuosl.org/job/TensorFlow_IBMZ_CI/badge/icon)](http://ibmz-ci.osuosl.org/job/TensorFlow_IBMZ_CI/) | TBA |
-| **IBM ppc64le CPU** | [![Build Status](http://powerci.osuosl.org/job/TensorFlow_Ubuntu_16.04_CPU/badge/icon)](http://powerci.osuosl.org/job/TensorFlow_Ubuntu_16.04_CPU/) | TBA |
+Learn more about the
+[TensorFlow Community](https://www.tensorflow.org/community) and how to
+[Contribute](https://www.tensorflow.org/community/contribute).
 
+## Courses
 
-## For more information
-
-* [TensorFlow Website](https://www.tensorflow.org)
-* [TensorFlow White Papers](https://www.tensorflow.org/about/bib)
-* [TensorFlow YouTube Channel](https://www.youtube.com/channel/UC0rqucBdTuFTjJiefW5t-IQ)
-* [TensorFlow Model Zoo](https://github.com/tensorflow/models)
-* [TensorFlow MOOC on Udacity](https://www.udacity.com/course/deep-learning--ud730)
-* [TensorFlow Course at Stanford](https://web.stanford.edu/class/cs20si)
-
-Learn more about the TensorFlow community at the [community page of tensorflow.org](https://www.tensorflow.org/community) for a few ways to participate.
+* [Coursera](https://www.coursera.org/search?query=TensorFlow)
+* [Udacity](https://www.udacity.com/courses/all?search=TensorFlow)
+* [Edx](https://www.edx.org/search?q=TensorFlow)
 
 ## License
 

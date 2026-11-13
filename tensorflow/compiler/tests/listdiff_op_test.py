@@ -14,12 +14,7 @@
 # ==============================================================================
 """Tests for XLA listdiff operator."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import numpy as np
-from six.moves import xrange  # pylint: disable=redefined-builtin
 
 from tensorflow.compiler.tests import xla_test
 from tensorflow.python.framework import dtypes
@@ -33,13 +28,13 @@ class ListDiffTest(xla_test.XLATestCase):
   def _testListDiff(self, x, y, out, idx):
     for dtype in [dtypes.int32, dtypes.int64]:
       for index_dtype in [dtypes.int32, dtypes.int64]:
-        with self.test_session() as sess:
+        with self.session():
           x_tensor = ops.convert_to_tensor(x, dtype=dtype)
           y_tensor = ops.convert_to_tensor(y, dtype=dtype)
           with self.test_scope():
             out_tensor, idx_tensor = array_ops.listdiff(
                 x_tensor, y_tensor, out_idx=index_dtype)
-            tf_out, tf_idx = sess.run([out_tensor, idx_tensor])
+            tf_out, tf_idx = self.evaluate([out_tensor, idx_tensor])
         self.assertAllEqual(out, tf_out)
         self.assertAllEqual(idx, tf_idx)
         self.assertEqual(1, out_tensor.get_shape().ndims)
@@ -65,7 +60,7 @@ class ListDiffTest(xla_test.XLATestCase):
     int_low = -7
     int_high = 8
     max_size = 50
-    for _ in xrange(num_random_tests):
+    for _ in range(num_random_tests):
       x_size = np.random.randint(max_size + 1)
       x = np.random.randint(int_low, int_high, size=x_size)
       y_size = np.random.randint(max_size + 1)

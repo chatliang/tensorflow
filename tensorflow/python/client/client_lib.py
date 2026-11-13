@@ -15,12 +15,8 @@
 
 """Support for launching graphs and executing operations.
 
-See the @{$python/client} guide.
+See the [Client](https://www.tensorflow.org/guide/graphs) guide.
 """
-
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
 
 # pylint: disable=unused-import
 from tensorflow.python.client.session import InteractiveSession

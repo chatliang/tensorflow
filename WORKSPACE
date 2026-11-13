@@ -1,81 +1,209 @@
+# Copyright 2026 The TensorFlow Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+
+# buildifier: disable=load-on-top
+
 workspace(name = "org_tensorflow")
 
-http_archive(
-    name = "io_bazel_rules_closure",
-    sha256 = "a38539c5b5c358548e75b44141b4ab637bba7c4dc02b46b1f62a96d6433f56ae",
-    strip_prefix = "rules_closure-dbb96841cc0a5fb2664c37822803b06dab20c7d1",
-    urls = [
-        "https://mirror.bazel.build/github.com/bazelbuild/rules_closure/archive/dbb96841cc0a5fb2664c37822803b06dab20c7d1.tar.gz",
-        "https://github.com/bazelbuild/rules_closure/archive/dbb96841cc0a5fb2664c37822803b06dab20c7d1.tar.gz",  # 2018-04-13
-    ],
+# buildifier: disable=load-on-top
+
+load("//third_party:repo.bzl", "tf_http_archive", "tf_mirror_urls")
+
+tf_http_archive(
+    name = "rules_shell",
+    sha256 = "bc61ef94facc78e20a645726f64756e5e285a045037c7a61f65af2941f4c25e1",
+    strip_prefix = "rules_shell-0.4.1",
+    urls = tf_mirror_urls(
+        "https://github.com/bazelbuild/rules_shell/releases/download/v0.4.1/rules_shell-v0.4.1.tar.gz",
+    ),
 )
 
-load("@io_bazel_rules_closure//closure:defs.bzl", "closure_repositories")
+# Initialize the TensorFlow repository and all dependencies.
+#
+# The cascade of load() statements and tf_workspace?() calls works around the
+# restriction that load() statements need to be at the top of .bzl files.
+# E.g. we can not retrieve a new repository with http_archive and then load()
+# a macro from that repository in the same file.
+load("@//tensorflow:workspace3.bzl", "tf_workspace3")
 
-closure_repositories()
+tf_workspace3()
 
-# We must check the bazel version before trying to parse any other BUILD
-# files, in case the parsing of those build files depends on the bazel
-# version we require here.
-load("//tensorflow:version_check.bzl", "check_bazel_version_at_least")
-check_bazel_version_at_least("0.10.0")
+load("@bazel_features//:deps.bzl", "bazel_features_deps")
 
-load("//tensorflow:workspace.bzl", "tf_workspace")
+bazel_features_deps()
 
-load("//third_party/android:android_configure.bzl", "android_configure")
-android_configure(name="local_config_android")
-load("@local_config_android//:android.bzl", "android_workspace")
-android_workspace()
+load("@rules_cc//cc:extensions.bzl", "compatibility_proxy_repo")
 
-# Please add all new TensorFlow dependencies in workspace.bzl.
-tf_workspace()
+compatibility_proxy_repo()
 
-new_http_archive(
-    name = "inception_v1",
-    build_file = "models.BUILD",
-    sha256 = "7efe12a8363f09bc24d7b7a450304a15655a57a7751929b2c1593a71183bb105",
-    urls = [
-        "http://storage.googleapis.com/download.tensorflow.org/models/inception_v1.zip",
-        "http://download.tensorflow.org/models/inception_v1.zip",
-    ],
+load("@rules_shell//shell:repositories.bzl", "rules_shell_dependencies", "rules_shell_toolchains")
+
+rules_shell_dependencies()
+
+rules_shell_toolchains()
+
+# Initialize hermetic C++
+load(
+    "@rules_ml_toolchain//cc/deps:cc_toolchain_deps.bzl",
+    "cc_toolchain_deps",
 )
 
-new_http_archive(
-    name = "mobile_ssd",
-    build_file = "models.BUILD",
-    sha256 = "bddd81ea5c80a97adfac1c9f770e6f55cbafd7cce4d3bbe15fbeb041e6b8f3e8",
-    urls = [
-        "http://storage.googleapis.com/download.tensorflow.org/models/object_detection/ssd_mobilenet_v1_android_export.zip",
-        "http://download.tensorflow.org/models/object_detection/ssd_mobilenet_v1_android_export.zip",
+cc_toolchain_deps()
+
+register_toolchains("@rules_ml_toolchain//cc:linux_x86_64_linux_x86_64")
+
+register_toolchains("@rules_ml_toolchain//cc:linux_x86_64_linux_x86_64_cuda")
+
+register_toolchains("@rules_ml_toolchain//cc:linux_x86_64_linux_aarch64")
+
+register_toolchains("@rules_ml_toolchain//cc:linux_aarch64_linux_aarch64")
+
+register_toolchains("@rules_ml_toolchain//cc:linux_aarch64_linux_aarch64_cuda")
+
+# Initialize hermetic Python
+load("@xla//third_party/py:python_init_rules.bzl", "python_init_rules")
+
+python_init_rules()
+
+load("@xla//third_party/py:python_init_repositories.bzl", "python_init_repositories")
+
+python_init_repositories(
+    default_python_version = "system",
+    local_wheel_dist_folder = "dist",
+    local_wheel_inclusion_list = [
+        "tensorflow*",
+        "tf_nightly*",
     ],
+    local_wheel_workspaces = ["//:WORKSPACE"],
+    requirements = {
+        "3.10": "//:requirements_lock_3_10.txt",
+        "3.11": "//:requirements_lock_3_11.txt",
+        "3.12": "//:requirements_lock_3_12.txt",
+        "3.13": "//:requirements_lock_3_13.txt",
+        "3.14": "//:requirements_lock_3_14.txt",
+        "3.14-freethreaded": "//:requirements_lock_3_14_freethreaded.txt",
+    },
 )
 
-new_http_archive(
-    name = "mobile_multibox",
-    build_file = "models.BUILD",
-    sha256 = "859edcddf84dddb974c36c36cfc1f74555148e9c9213dedacf1d6b613ad52b96",
-    urls = [
-        "http://storage.googleapis.com/download.tensorflow.org/models/mobile_multibox_v1a.zip",
-        "http://download.tensorflow.org/models/mobile_multibox_v1a.zip",
-    ],
+load("@xla//third_party/py:python_init_toolchains.bzl", "python_init_toolchains")
+
+python_init_toolchains()
+
+load("@xla//third_party/py:python_init_pip.bzl", "python_init_pip")
+
+python_init_pip()
+
+load("@pypi//:requirements.bzl", "install_deps")
+
+install_deps()
+# End hermetic Python initialization
+
+load("@//tensorflow:workspace2.bzl", "tf_workspace2")
+
+tf_workspace2()
+
+load("@//tensorflow:workspace1.bzl", "tf_workspace1")
+
+tf_workspace1()
+
+load("@//tensorflow:workspace0.bzl", "tf_workspace0")
+
+tf_workspace0()
+
+load(
+    "@xla//third_party/py:python_wheel.bzl",
+    "nvidia_wheel_versions_repository",
+    "python_wheel_version_suffix_repository",
 )
 
-new_http_archive(
-    name = "stylize",
-    build_file = "models.BUILD",
-    sha256 = "3d374a730aef330424a356a8d4f04d8a54277c425e274ecb7d9c83aa912c6bfa",
-    urls = [
-        "http://storage.googleapis.com/download.tensorflow.org/models/stylize_v1.zip",
-        "http://download.tensorflow.org/models/stylize_v1.zip",
-    ],
+nvidia_wheel_versions_repository(
+    name = "nvidia_wheel_versions",
+    versions_source = "//ci/official/requirements_updater:nvidia-requirements.txt",
 )
 
-new_http_archive(
-    name = "speech_commands",
-    build_file = "models.BUILD",
-    sha256 = "c3ec4fea3158eb111f1d932336351edfe8bd515bb6e87aad4f25dbad0a600d0c",
-    urls = [
-        "http://storage.googleapis.com/download.tensorflow.org/models/speech_commands_v0.01.zip",
-        "http://download.tensorflow.org/models/speech_commands_v0.01.zip",
-    ],
+python_wheel_version_suffix_repository(name = "tf_wheel_version_suffix")
+
+load(
+    "@rules_ml_toolchain//gpu/cuda:cuda_json_init_repository.bzl",
+    "cuda_json_init_repository",
+)
+
+cuda_json_init_repository()
+
+load(
+    "@cuda_redist_json//:distributions.bzl",
+    "CUDA_REDISTRIBUTIONS",
+    "CUDNN_REDISTRIBUTIONS",
+)
+load(
+    "@rules_ml_toolchain//gpu/cuda:cuda_redist_init_repositories.bzl",
+    "cuda_redist_init_repositories",
+    "cudnn_redist_init_repository",
+)
+load(
+    "@rules_ml_toolchain//gpu/cuda:cuda_redist_versions.bzl",
+    "REDIST_VERSIONS_TO_BUILD_TEMPLATES",
+)
+load("@xla//third_party/cccl:workspace.bzl", "CCCL_2_8_5_DIST_DICT", "CCCL_GITHUB_VERSIONS_TO_BUILD_TEMPLATES")
+
+cuda_redist_init_repositories(
+    cuda_redistributions = CUDA_REDISTRIBUTIONS | CCCL_2_8_5_DIST_DICT,
+    redist_versions_to_build_templates = REDIST_VERSIONS_TO_BUILD_TEMPLATES | CCCL_GITHUB_VERSIONS_TO_BUILD_TEMPLATES,
+)
+
+cudnn_redist_init_repository(
+    cudnn_redistributions = CUDNN_REDISTRIBUTIONS,
+)
+
+load(
+    "@rules_ml_toolchain//gpu/cuda:cuda_configure.bzl",
+    "cuda_configure",
+)
+
+cuda_configure(name = "local_config_cuda")
+
+load(
+    "@rules_ml_toolchain//gpu/nccl:nccl_redist_init_repository.bzl",
+    "nccl_redist_init_repository",
+)
+
+nccl_redist_init_repository(patches = ["//third_party/nccl:nccl_wheel.patch"])
+
+load(
+    "@rules_ml_toolchain//gpu/nccl:nccl_configure.bzl",
+    "nccl_configure",
+)
+
+nccl_configure(name = "local_config_nccl")
+
+load(
+    "@rules_ml_toolchain//gpu/nvshmem:nvshmem_json_init_repository.bzl",
+    "nvshmem_json_init_repository",
+)
+
+nvshmem_json_init_repository()
+
+load(
+    "@nvshmem_redist_json//:distributions.bzl",
+    "NVSHMEM_REDISTRIBUTIONS",
+)
+load(
+    "@rules_ml_toolchain//gpu/nvshmem:nvshmem_redist_init_repository.bzl",
+    "nvshmem_redist_init_repository",
+)
+
+nvshmem_redist_init_repository(
+    nvshmem_redistributions = NVSHMEM_REDISTRIBUTIONS,
 )

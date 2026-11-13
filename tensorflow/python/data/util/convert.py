@@ -13,10 +13,6 @@
 # limitations under the License.
 # ==============================================================================
 """Helpers constructing Datasets."""
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 from tensorflow.python.framework import constant_op
 from tensorflow.python.framework import dtypes
 from tensorflow.python.framework import ops
@@ -36,11 +32,11 @@ def optional_param_to_tensor(argument_name,
 
 
 def partial_shape_to_tensor(shape_like):
-  """Returns a @{tf.Tensor} that represents the given shape.
+  """Returns a `tf.Tensor` that represents the given shape.
 
   Args:
-    shape_like: A value that can be converted to a @{tf.TensorShape} or a
-      @{tf.Tensor}.
+    shape_like: A value that can be converted to a `tf.TensorShape` or a
+      `tf.Tensor`.
 
   Returns:
     A 1-D `tf.Tensor` of `tf.int64` elements representing the given shape, where
@@ -60,13 +56,12 @@ def partial_shape_to_tensor(shape_like):
     # machinery.
     ret = ops.convert_to_tensor(shape_like, preferred_dtype=dtypes.int64)
     if ret.shape.dims is not None and len(ret.shape.dims) != 1:
-      raise ValueError("The given shape %s must be a 1-D tensor of tf.int64 "
-                       "values, but the shape was %s."
-                       % (shape_like, ret.shape))
+      raise ValueError("The given shape {} must be a 1-D tensor of `tf.int64` "
+                       "values, but the shape was {}.".format(
+                           shape_like, ret.shape))
     if ret.dtype != dtypes.int64:
-      raise TypeError("The given shape %s must be a 1-D tensor of tf.int64 "
-                      "values, but the element type was %s."
-                      % (shape_like, ret.dtype.name))
+      raise TypeError("The given shape {} must be a 1-D tensor of `tf.int64` "
+                      "values, but the element type was {}.".format(
+                          shape_like, ret.dtype.name))
 
     return ret
-

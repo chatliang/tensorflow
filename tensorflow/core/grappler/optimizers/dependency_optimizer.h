@@ -29,18 +29,16 @@ namespace grappler {
 // optimizations, such as removing nodes that are effectively noops.
 class DependencyOptimizer : public GraphOptimizer {
  public:
-  DependencyOptimizer() {}
-  explicit DependencyOptimizer(RewriterConfig::Toggle opt_level)
-      : opt_level_(opt_level) {}
-  ~DependencyOptimizer() override {}
+  DependencyOptimizer() = default;
+  explicit DependencyOptimizer(RewriterConfig::Toggle opt_level) {}
+  ~DependencyOptimizer() override = default;
 
-  string name() const override { return "dependency_optimizer"; };
+  std::string name() const override { return "dependency_optimizer"; };
 
-  Status Optimize(Cluster* cluster, const GrapplerItem& item,
-                  GraphDef* optimized_graph) override;
+  bool UsesFunctionLibrary() const override { return false; }
 
-  void Feedback(Cluster* cluster, const GrapplerItem& item,
-                const GraphDef& optimized_graph, double result) override;
+  absl::Status Optimize(Cluster* cluster, const GrapplerItem& item,
+                        GraphDef* optimized_graph) override;
 
  private:
   // Returns true if bypassing node does not increase the number of edges or
@@ -48,7 +46,8 @@ class DependencyOptimizer : public GraphOptimizer {
   bool BypassingNodeIsBeneficial(
       const NodeDef& node, const std::vector<NodeDef*>& input_nodes,
       const std::vector<NodeDef*>& output_nodes) const;
-
+  int NumEdgesIfBypassed(const NodeDef& node,
+                         const std::vector<NodeDef*>& output_nodes) const;
   // Returns true if node is not an Identity node or if it is an Identity
   // that is safe to remove.
   bool SafeToRemoveIdentity(const NodeDef& node) const;
@@ -65,16 +64,16 @@ class DependencyOptimizer : public GraphOptimizer {
                     std::set<int>* nodes_to_delete);
   // Eliminates redundant control dependencies by computing the transitive
   // reduction of the graph.
-  Status TransitiveReduction();
+  absl::Status TransitiveReduction();
   // Main driver of dependency optimizations.
-  Status OptimizeDependencies();
+  absl::Status OptimizeDependencies();
   // Replaces multiple cross-device control edges from the same device with a
-  // single control edge.
-  void GroupCrossDeviceControlEdges();
+  // single control edge.  If `host_granularity` is true then group control
+  // edges from all devices on the same host.
+  void GroupCrossDeviceControlEdges(bool host_granularity);
 
-  RewriterConfig::Toggle opt_level_;
   bool fetch_nodes_known_;
-  std::unordered_set<string> nodes_to_preserve_;
+  std::unordered_set<std::string> nodes_to_preserve_;
   std::unique_ptr<NodeMap> node_map_;
   std::unordered_map<const NodeDef*, int> node_to_idx_;
   GraphDef* optimized_graph_;  // Not owned.

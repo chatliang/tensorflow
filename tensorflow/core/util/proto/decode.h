@@ -27,6 +27,7 @@ limitations under the License.
 #define TENSORFLOW_CORE_UTIL_PROTO_DECODE_H_
 
 #include "tensorflow/core/framework/tensor.h"
+#include "tensorflow/core/framework/types.h"
 #include "tensorflow/core/platform/protobuf.h"
 #include "tensorflow/core/platform/types.h"
 
@@ -41,16 +42,16 @@ using tensorflow::protobuf::io::StringOutputStream;
 // Converts an uint64 to an int64 without loss of information.
 // Unsigned values greater than INT64_MAX are represented as
 // negative numbers by wrapping (same as twos-complement bit equivalence).
-inline int64 WrapUnsignedAsSigned64(uint64 unsigned_value) {
+inline int64_t WrapUnsignedAsSigned64(uint64_t unsigned_value) {
   // For a detailed explanation of why this works to wrap unsigned ints, see
   // http://stackoverflow.com/questions/13150449/efficient-unsigned-to-signed-cast-avoiding-implementation-defined-behavior
   // Both if tests should be optimized out.
   if (unsigned_value <= INT64_MAX) {
-    return static_cast<int64>(unsigned_value);
+    return static_cast<int64_t>(unsigned_value);
   }
   // The C++ spec allows an architecture where this test is required.
   if (unsigned_value >= INT64_MIN) {
-    return static_cast<int64>(unsigned_value - INT64_MIN) + INT64_MIN;
+    return static_cast<int64_t>(unsigned_value - INT64_MIN) + INT64_MIN;
   }
   return 0;  // This should never occur.
 }
@@ -58,16 +59,16 @@ inline int64 WrapUnsignedAsSigned64(uint64 unsigned_value) {
 // Converts an uint32 to an int32 without loss of information.
 // Unsigned values greater than INT_MAX are represented as
 // negative numbers by wrapping (same as twos-complement bit equivalence).
-inline int32 WrapUnsignedAsSigned32(uint32 unsigned_value) {
+inline int32_t WrapUnsignedAsSigned32(uint32_t unsigned_value) {
   // For a detailed explanation of why this works to wrap unsigned ints, see
   // http://stackoverflow.com/questions/13150449/efficient-unsigned-to-signed-cast-avoiding-implementation-defined-behavior
   // Both if tests should be optimized out.
   if (unsigned_value <= INT_MAX) {
-    return static_cast<int32>(unsigned_value);
+    return static_cast<int32_t>(unsigned_value);
   }
   // The C++ spec allows an architecture where this test is required.
   if (unsigned_value >= INT_MIN) {
-    return static_cast<int32>(unsigned_value - INT_MIN) + INT_MIN;
+    return static_cast<int32_t>(unsigned_value - INT_MIN) + INT_MIN;
   }
   return 0;  // This should never occur.
 }
@@ -77,8 +78,8 @@ inline int32 WrapUnsignedAsSigned32(uint32 unsigned_value) {
 // space in the buffer.
 // The ok value will be set to false if the buffer does not contain
 // a valid varint.
-inline const uint8* ReadVarint64FromArray(const uint8* buffer, bool* ok,
-                                          uint64* value);
+inline const uint8_t* ReadVarint64FromArray(const uint8_t* buffer, bool* ok,
+                                            uint64_t* value);
 
 // Reads a single varint32 from a byte array.
 // It is the caller's responsibility to ensure that there is enough
@@ -88,10 +89,10 @@ inline const uint8* ReadVarint64FromArray(const uint8* buffer, bool* ok,
 // This is slightly less efficient than the private version in
 // coded_stream.cc but we duplicate less code by calling
 // the 64 bit version instead of copying the code.
-inline const uint8* ReadVarint32FromArray(const uint8* buffer, bool* ok,
-                                          uint32* value) {
-  uint64 tmp;
-  const uint8* buf = ReadVarint64FromArray(buffer, ok, &tmp);
+inline const uint8_t* ReadVarint32FromArray(const uint8_t* buffer, bool* ok,
+                                            uint32_t* value) {
+  uint64_t tmp = 0;
+  const uint8_t* buf = ReadVarint64FromArray(buffer, ok, &tmp);
   *value = tmp & 0xffffffff;
   return buf;
 }
@@ -100,22 +101,32 @@ inline const uint8* ReadVarint32FromArray(const uint8* buffer, bool* ok,
 // The array is part of a Tensor that was allocated by the caller
 // with type TensorType, while DeclaredType is the proto field type.
 template <class TensorType, enum WireFormatLite::FieldType DeclaredType>
-const uint8* ReadFromArray(const uint8* buf, TensorType* value);
+const uint8_t* ReadFromArray(const uint8_t* buf, TensorType* value);
 
 template <>
-inline const uint8* ReadFromArray<int32, WireFormatLite::TYPE_INT32>(
-    const uint8* buf, int32* value) {
-  uint32 temp;
+inline const uint8_t* ReadFromArray<int64_t, WireFormatLite::TYPE_INT32>(
+    const uint8_t* buf, int64_t* value) {
+  uint32_t temp = 0;
   bool unused_ok;  // The Counting pass would have failed if this were corrupt.
   buf = ReadVarint32FromArray(buf, &unused_ok, &temp);
-  *value = static_cast<int32>(temp);
+  *value = static_cast<int64_t>(temp);
   return buf;
 }
 
 template <>
-inline const uint8* ReadFromArray<int64, WireFormatLite::TYPE_INT64>(
-    const uint8* buf, int64* value) {
-  uint64 temp;
+inline const uint8_t* ReadFromArray<int32_t, WireFormatLite::TYPE_INT32>(
+    const uint8_t* buf, int32_t* value) {
+  uint32_t temp = 0;
+  bool unused_ok;  // The Counting pass would have failed if this were corrupt.
+  buf = ReadVarint32FromArray(buf, &unused_ok, &temp);
+  *value = static_cast<int32_t>(temp);
+  return buf;
+}
+
+template <>
+inline const uint8_t* ReadFromArray<int64_t, WireFormatLite::TYPE_INT64>(
+    const uint8_t* buf, int64_t* value) {
+  uint64_t temp = 0;
   bool unused_ok;  // The Counting pass would have failed if this were corrupt.
   buf = ReadVarint64FromArray(buf, &unused_ok, &temp);
   *value = WrapUnsignedAsSigned64(temp);
@@ -123,9 +134,9 @@ inline const uint8* ReadFromArray<int64, WireFormatLite::TYPE_INT64>(
 }
 
 template <>
-inline const uint8* ReadFromArray<int64, WireFormatLite::TYPE_UINT32>(
-    const uint8* buf, int64* value) {
-  uint32 temp;
+inline const uint8_t* ReadFromArray<uint64_t, WireFormatLite::TYPE_UINT32>(
+    const uint8_t* buf, uint64_t* value) {
+  uint32_t temp = 0;
   bool unused_ok;  // The Counting pass would have failed if this were corrupt.
   buf = ReadVarint32FromArray(buf, &unused_ok, &temp);
   *value = temp;
@@ -133,29 +144,33 @@ inline const uint8* ReadFromArray<int64, WireFormatLite::TYPE_UINT32>(
 }
 
 template <>
-inline const uint8* ReadFromArray<int32, WireFormatLite::TYPE_UINT32>(
-    const uint8* buf, int32* value) {
-  uint32 temp;
+inline const uint8_t* ReadFromArray<uint32_t, WireFormatLite::TYPE_UINT32>(
+    const uint8_t* buf, uint32_t* value) {
   bool unused_ok;  // The Counting pass would have failed if this were corrupt.
-  buf = ReadVarint32FromArray(buf, &unused_ok, &temp);
-  *value = WrapUnsignedAsSigned32(temp);
-  return buf;
+  return ReadVarint32FromArray(buf, &unused_ok, value);
 }
 
 template <>
-inline const uint8* ReadFromArray<int64, WireFormatLite::TYPE_UINT64>(
-    const uint8* buf, int64* value) {
-  uint64 temp;
+inline const uint8_t* ReadFromArray<uint64_t, WireFormatLite::TYPE_UINT64>(
+    const uint8_t* buf, uint64_t* value) {
+  bool unused_ok;  // The Counting pass would have failed if this were corrupt.
+  return ReadVarint64FromArray(buf, &unused_ok, value);
+}
+
+template <>
+inline const uint8_t* ReadFromArray<int64_t, WireFormatLite::TYPE_SINT32>(
+    const uint8_t* buf, int64_t* value) {
+  uint64_t temp = 0;
   bool unused_ok;  // The Counting pass would have failed if this were corrupt.
   buf = ReadVarint64FromArray(buf, &unused_ok, &temp);
-  *value = static_cast<int64>(temp);
+  *value = WireFormatLite::ZigZagDecode32(temp);
   return buf;
 }
 
 template <>
-inline const uint8* ReadFromArray<int32, WireFormatLite::TYPE_SINT32>(
-    const uint8* buf, int32* value) {
-  uint32 temp;
+inline const uint8_t* ReadFromArray<int32_t, WireFormatLite::TYPE_SINT32>(
+    const uint8_t* buf, int32_t* value) {
+  uint32_t temp = 0;
   bool unused_ok;  // The Counting pass would have failed if this were corrupt.
   buf = ReadVarint32FromArray(buf, &unused_ok, &temp);
   *value = WireFormatLite::ZigZagDecode32(temp);
@@ -163,9 +178,9 @@ inline const uint8* ReadFromArray<int32, WireFormatLite::TYPE_SINT32>(
 }
 
 template <>
-inline const uint8* ReadFromArray<int64, WireFormatLite::TYPE_SINT64>(
-    const uint8* buf, int64* value) {
-  uint64 temp;
+inline const uint8_t* ReadFromArray<int64_t, WireFormatLite::TYPE_SINT64>(
+    const uint8_t* buf, int64_t* value) {
+  uint64_t temp = 0;
   bool unused_ok;  // The Counting pass would have failed if this were corrupt.
   buf = ReadVarint64FromArray(buf, &unused_ok, &temp);
   *value = WireFormatLite::ZigZagDecode64(temp);
@@ -173,10 +188,10 @@ inline const uint8* ReadFromArray<int64, WireFormatLite::TYPE_SINT64>(
 }
 
 template <>
-inline const uint8* ReadFromArray<int64, WireFormatLite::TYPE_FIXED32>(
-    const uint8* buf, int64* value) {
-  uint32 temp;
-  buf = WireFormatLite::ReadPrimitiveFromArray<uint32,
+inline const uint8_t* ReadFromArray<uint64_t, WireFormatLite::TYPE_FIXED32>(
+    const uint8_t* buf, uint64_t* value) {
+  uint32_t temp;
+  buf = WireFormatLite::ReadPrimitiveFromArray<uint32_t,
                                                WireFormatLite::TYPE_FIXED32>(
       buf, &temp);
   *value = temp;
@@ -184,10 +199,10 @@ inline const uint8* ReadFromArray<int64, WireFormatLite::TYPE_FIXED32>(
 }
 
 template <>
-inline const uint8* ReadFromArray<int32, WireFormatLite::TYPE_FIXED32>(
-    const uint8* buf, int32* value) {
-  uint32 temp;
-  buf = WireFormatLite::ReadPrimitiveFromArray<uint32,
+inline const uint8_t* ReadFromArray<uint32_t, WireFormatLite::TYPE_FIXED32>(
+    const uint8_t* buf, uint32_t* value) {
+  uint32_t temp;
+  buf = WireFormatLite::ReadPrimitiveFromArray<uint32_t,
                                                WireFormatLite::TYPE_FIXED32>(
       buf, &temp);
   *value = WrapUnsignedAsSigned32(temp);
@@ -195,8 +210,8 @@ inline const uint8* ReadFromArray<int32, WireFormatLite::TYPE_FIXED32>(
 }
 
 template <>
-inline const uint8* ReadFromArray<int64, WireFormatLite::TYPE_FIXED64>(
-    const uint8* buf, int64* value) {
+inline const uint8_t* ReadFromArray<uint64_t, WireFormatLite::TYPE_FIXED64>(
+    const uint8_t* buf, uint64_t* value) {
   protobuf_uint64 temp;
   buf = WireFormatLite::ReadPrimitiveFromArray<protobuf_uint64,
                                                WireFormatLite::TYPE_FIXED64>(
@@ -206,16 +221,27 @@ inline const uint8* ReadFromArray<int64, WireFormatLite::TYPE_FIXED64>(
 }
 
 template <>
-inline const uint8* ReadFromArray<int32, WireFormatLite::TYPE_SFIXED32>(
-    const uint8* buf, int32* value) {
-  return WireFormatLite::ReadPrimitiveFromArray<int32,
+inline const uint8_t* ReadFromArray<int64_t, WireFormatLite::TYPE_SFIXED32>(
+    const uint8_t* buf, int64_t* value) {
+  int32_t temp;
+  buf = WireFormatLite::ReadPrimitiveFromArray<int32_t,
+                                               WireFormatLite::TYPE_SFIXED32>(
+      buf, &temp);
+  *value = temp;
+  return buf;
+}
+
+template <>
+inline const uint8_t* ReadFromArray<int32_t, WireFormatLite::TYPE_SFIXED32>(
+    const uint8_t* buf, int32_t* value) {
+  return WireFormatLite::ReadPrimitiveFromArray<int32_t,
                                                 WireFormatLite::TYPE_SFIXED32>(
       buf, value);
 }
 
 template <>
-inline const uint8* ReadFromArray<int64, WireFormatLite::TYPE_SFIXED64>(
-    const uint8* buf, int64* value) {
+inline const uint8_t* ReadFromArray<int64_t, WireFormatLite::TYPE_SFIXED64>(
+    const uint8_t* buf, int64_t* value) {
   protobuf_int64 temp;
   buf = WireFormatLite::ReadPrimitiveFromArray<protobuf_int64,
                                                WireFormatLite::TYPE_SFIXED64>(
@@ -225,25 +251,36 @@ inline const uint8* ReadFromArray<int64, WireFormatLite::TYPE_SFIXED64>(
 }
 
 template <>
-inline const uint8* ReadFromArray<float, WireFormatLite::TYPE_FLOAT>(
-    const uint8* buf, float* value) {
+inline const uint8_t* ReadFromArray<float, WireFormatLite::TYPE_FLOAT>(
+    const uint8_t* buf, float* value) {
   return WireFormatLite::ReadPrimitiveFromArray<float,
                                                 WireFormatLite::TYPE_FLOAT>(
       buf, value);
 }
 
 template <>
-inline const uint8* ReadFromArray<double, WireFormatLite::TYPE_DOUBLE>(
-    const uint8* buf, double* value) {
+inline const uint8_t* ReadFromArray<double, WireFormatLite::TYPE_FLOAT>(
+    const uint8_t* buf, double* value) {
+  float temp;
+  buf =
+      WireFormatLite::ReadPrimitiveFromArray<float, WireFormatLite::TYPE_FLOAT>(
+          buf, &temp);
+  *value = temp;
+  return buf;
+}
+
+template <>
+inline const uint8_t* ReadFromArray<double, WireFormatLite::TYPE_DOUBLE>(
+    const uint8_t* buf, double* value) {
   return WireFormatLite::ReadPrimitiveFromArray<double,
                                                 WireFormatLite::TYPE_DOUBLE>(
       buf, value);
 }
 
 template <>
-inline const uint8* ReadFromArray<bool, WireFormatLite::TYPE_BOOL>(
-    const uint8* buf, bool* value) {
-  uint64 temp;
+inline const uint8_t* ReadFromArray<bool, WireFormatLite::TYPE_BOOL>(
+    const uint8_t* buf, bool* value) {
+  uint64_t temp = 0;
   bool unused_ok;  // The Counting pass would have failed if this were corrupt.
   buf = ReadVarint64FromArray(buf, &unused_ok, &temp);
   *value = temp != 0;
@@ -251,9 +288,9 @@ inline const uint8* ReadFromArray<bool, WireFormatLite::TYPE_BOOL>(
 }
 
 template <>
-inline const uint8* ReadFromArray<int, WireFormatLite::TYPE_ENUM>(
-    const uint8* buf, int* value) {
-  uint32 temp;
+inline const uint8_t* ReadFromArray<int, WireFormatLite::TYPE_ENUM>(
+    const uint8_t* buf, int* value) {
+  uint32_t temp = 0;
   bool unused_ok;  // The Counting pass would have failed if this were corrupt.
   buf = ReadVarint32FromArray(buf, &unused_ok, &temp);
   *value = static_cast<int>(temp);
@@ -263,12 +300,16 @@ inline const uint8* ReadFromArray<int, WireFormatLite::TYPE_ENUM>(
 // Reads packed values from an array.
 // Stride is set to 1 for repeated fields, and 0 for non-repeated fields
 // (where any value overwrites previous values).
+// `data_size` is the number of elements in the array at `datap`. Returns the
+// number of elements filled (at most 1 for a non-repeated field), or -1 if the
+// values don't fit in the array after `index`; nothing is written past
+// `data_size` in either case.
 template <class TensorType, enum WireFormatLite::FieldType DeclaredType>
 inline int ReadPackedPrimitives(const void* bufp, const size_t len,
                                 const int index, const int stride,
-                                void* datap) {
-  const uint8* buf = reinterpret_cast<const uint8*>(bufp);
-  const uint8* bound = buf + len;
+                                const int data_size, void* datap) {
+  const uint8_t* buf = reinterpret_cast<const uint8_t*>(bufp);
+  const uint8_t* bound = buf + len;
   TensorType* data = reinterpret_cast<TensorType*>(datap) + index;
   int count;
 
@@ -276,106 +317,154 @@ inline int ReadPackedPrimitives(const void* bufp, const size_t len,
   // against in the caller, where it ensures that the input buffer
   // contains complete values.
   for (count = 0; buf < bound; count += stride) {
+    if (count >= data_size - index) {
+      return -1;
+    }
     buf = ReadFromArray<TensorType, DeclaredType>(buf, data + count);
+  }
+  if (stride == 0 && len > 0) {
+    // The last value of a non-repeated field is stored at `index`, which must
+    // count as filled so that it isn't replaced by the default value.
+    return 1;
   }
   return count;
 }
 
-// Reads a primitive value field from a serialized proto.
+// Adds the number of values stored by ReadPackedPrimitives to `index`.
+inline absl::Status AdvancePackedIndex(int count, int* index) {
+  DCHECK(index != nullptr);
+  if (count < 0) {
+    return absl::DataLossError("Packed field has more values than expected");
+  }
+  *index += count;
+  return absl::OkStatus();
+}
+
+// Reads a value of a primitive type field from a serialized proto.
 // The value is parsed from the serialized format, then static_cast
 // to the desired type for TensorFlow and stored.
 template <class ValueType, class TensorType,
           enum WireFormatLite::FieldType DeclaredType>
-inline Status ReadPrimitive(CodedInputStream* input, int index, void* data) {
+inline absl::Status ReadPrimitive(CodedInputStream* input, int index,
+                                  void* data) {
   ValueType v;
   if (!WireFormatLite::ReadPrimitive<ValueType, DeclaredType>(input, &v)) {
-    return errors::DataLoss("Failed reading primitive");
+    return absl::DataLossError("Failed reading primitive");
   }
 
   reinterpret_cast<TensorType*>(data)[index] = v;
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 // Reads a string, submessage, or other variable-length field from a
 // serialized proto.
 // May read all or part of a repeated field.
-inline Status ReadBytes(CodedInputStream* input, int index, void* datap) {
-  string* data = reinterpret_cast<string*>(datap) + index;
-  if (!WireFormatLite::ReadBytes(input, data)) {
-    return errors::DataLoss("Failed reading bytes");
+inline absl::Status ReadBytes(CodedInputStream* input, int index, void* datap) {
+  tstring* data = reinterpret_cast<tstring*>(datap) + index;
+
+  uint32_t length;
+  if (!input->ReadVarint32(&length)) {
+    return absl::DataLossError("Failed reading bytes");
   }
-  return Status::OK();
+
+  data->resize_uninitialized(length);
+
+  if (!input->ReadRaw(data->data(), length)) {
+    return absl::DataLossError("Failed reading bytes");
+  }
+  return absl::OkStatus();
 }
 
 // Reads a tag-delimited field (TYPE_GROUP) from a serialized proto,
 // as a bytestring.
-inline Status ReadGroupBytes(CodedInputStream* input, int field_number,
-                             int index, void* datap) {
+inline absl::Status ReadGroupBytes(CodedInputStream* input, int field_number,
+                                   int index, void* datap) {
   // WireFormatLite::SkipField has an option to emit the
   // skipped bytes to an output stream. We could do better by implementing our
   // own scanner but this is simpler for now.
   // TODO(nix): there is a faster way to grab TYPE_GROUP bytes by relying
   // on input->IsFlat() == true and using input->GetDirectBufferPointer()
   // with input->CurrentPosition().
-  string* data = reinterpret_cast<string*>(datap) + index;
-  StringOutputStream string_stream(data);
-  CodedOutputStream out(&string_stream);
-  if (!WireFormatLite::SkipField(
-          input,
-          WireFormatLite::MakeTag(field_number,
-                                  WireFormatLite::WIRETYPE_START_GROUP),
-          &out)) {
-    return errors::DataLoss("Failed reading group");
+  tstring* data = reinterpret_cast<tstring*>(datap) + index;
+  // TODO(dero): To mitigate the string to tstring copy, we can implement our
+  // own scanner as described above.  We would first need to obtain the length
+  // in an initial pass and resize/reserve the tstring. But, given that
+  // TYPE_GROUP is deprecated and currently no tests in
+  // tensorflow/python/kernel_tests/proto:decode_proto_op_test target a
+  // TYPE_GROUP tag, we use std::string as a read buffer.
+  std::string buf;
+  StringOutputStream string_stream(&buf);
+  {
+    CodedOutputStream out(&string_stream);
+    if (!WireFormatLite::SkipField(
+            input,
+            WireFormatLite::MakeTag(field_number,
+                                    WireFormatLite::WIRETYPE_START_GROUP),
+            &out)) {
+      return absl::DataLossError("Failed reading group");
+    }
   }
-  return Status::OK();
+  *data = buf;
+  return absl::OkStatus();
 }
 
 // Reads a single field value from a CodedInputStream into a tensor.
-inline Status ReadValue(CodedInputStream* input,
-                        WireFormatLite::FieldType field_type, int field_number,
-                        DataType dtype, int index, void* datap) {
-  // Dispatch to the appropriately typed field reader based on the
-  // schema type.
+inline absl::Status ReadValue(CodedInputStream* input,
+                              WireFormatLite::FieldType field_type,
+                              int field_number, DataType dtype, int index,
+                              void* datap) {
+  // Dispatch to the appropriately typed field reader based on the schema type.
   switch (field_type) {
     case WireFormatLite::TYPE_DOUBLE:
       return ReadPrimitive<double, double, WireFormatLite::TYPE_DOUBLE>(
           input, index, datap);
     case WireFormatLite::TYPE_FLOAT:
-      if (dtype == DataType::DT_FLOAT) {
-        return ReadPrimitive<float, float, WireFormatLite::TYPE_FLOAT>(
-            input, index, datap);
+      switch (dtype) {
+        case DataType::DT_DOUBLE:
+          return ReadPrimitive<float, double, WireFormatLite::TYPE_FLOAT>(
+              input, index, datap);
+        case DataType::DT_FLOAT:
+          return ReadPrimitive<float, float, WireFormatLite::TYPE_FLOAT>(
+              input, index, datap);
+        default:
+          return absl::DataLossError(absl::StrCat(
+              "Failed reading TYPE_FLOAT for ", DataTypeString(dtype)));
       }
-      if (dtype == DataType::DT_DOUBLE) {
-        return ReadPrimitive<float, double, WireFormatLite::TYPE_FLOAT>(
-            input, index, datap);
-      }
-      // Any case that reaches this point should have triggered an error
-      // already.
-      return errors::DataLoss("Failed reading TYPE_FLOAT");
     case WireFormatLite::TYPE_INT64:
-      return ReadPrimitive<protobuf_int64, int64, WireFormatLite::TYPE_INT64>(
+      return ReadPrimitive<protobuf_int64, int64_t, WireFormatLite::TYPE_INT64>(
           input, index, datap);
     case WireFormatLite::TYPE_UINT64:
-      return ReadPrimitive<protobuf_uint64, int64, WireFormatLite::TYPE_UINT64>(
-          input, index, datap);
+      return ReadPrimitive<protobuf_uint64, uint64_t,
+                           WireFormatLite::TYPE_UINT64>(input, index, datap);
     case WireFormatLite::TYPE_INT32:
-      return ReadPrimitive<int32, int32, WireFormatLite::TYPE_INT32>(
-          input, index, datap);
+      switch (dtype) {
+        case DataType::DT_INT64:
+          return ReadPrimitive<int32_t, int64_t, WireFormatLite::TYPE_INT32>(
+              input, index, datap);
+        case DataType::DT_INT32:
+          return ReadPrimitive<int32_t, int32_t, WireFormatLite::TYPE_INT32>(
+              input, index, datap);
+        default:
+          return absl::DataLossError(absl::StrCat(
+              "Failed reading TYPE_INT32 for ", DataTypeString(dtype)));
+      }
     case WireFormatLite::TYPE_FIXED64:
-      return ReadPrimitive<protobuf_uint64, int64,
+      return ReadPrimitive<protobuf_uint64, uint64_t,
                            WireFormatLite::TYPE_FIXED64>(input, index, datap);
     case WireFormatLite::TYPE_FIXED32:
-      if (dtype == DataType::DT_INT64) {
-        return ReadPrimitive<uint32, int64, WireFormatLite::TYPE_FIXED32>(
-            input, index, datap);
+      switch (dtype) {
+        case DataType::DT_UINT64:
+          return ReadPrimitive<uint32_t, uint64_t,
+                               WireFormatLite::TYPE_FIXED32>(input, index,
+                                                             datap);
+        case DataType::DT_UINT32:
+          return ReadPrimitive<uint32_t, uint32_t,
+                               WireFormatLite::TYPE_FIXED32>(input, index,
+                                                             datap);
+        default:
+          return absl::DataLossError(absl::StrCat(
+              "Failed reading TYPE_FIXED32 for ", DataTypeString(dtype)));
       }
-      if (dtype == DataType::DT_INT32) {
-        return ReadPrimitive<uint32, int32, WireFormatLite::TYPE_FIXED32>(
-            input, index, datap);
-      }
-      // Any case that reaches this point should have triggered an error
-      // already.
-      return errors::DataLoss("Failed reading TYPE_FIXED32");
     case WireFormatLite::TYPE_BOOL:
       return ReadPrimitive<bool, bool, WireFormatLite::TYPE_BOOL>(input, index,
                                                                   datap);
@@ -388,134 +477,210 @@ inline Status ReadValue(CodedInputStream* input,
     case WireFormatLite::TYPE_BYTES:
       return ReadBytes(input, index, datap);
     case WireFormatLite::TYPE_UINT32:
-      if (dtype == DataType::DT_INT64) {
-        return ReadPrimitive<uint32, int64, WireFormatLite::TYPE_UINT32>(
-            input, index, datap);
+      switch (dtype) {
+        case DataType::DT_UINT64:
+          return ReadPrimitive<uint32_t, uint64_t, WireFormatLite::TYPE_UINT32>(
+              input, index, datap);
+        case DataType::DT_UINT32:
+          return ReadPrimitive<uint32_t, uint32_t, WireFormatLite::TYPE_UINT32>(
+              input, index, datap);
+        default:
+          return absl::DataLossError(absl::StrCat(
+              "Failed reading TYPE_UINT32 for ", DataTypeString(dtype)));
       }
-      if (dtype == DataType::DT_INT32) {
-        return ReadPrimitive<uint32, int32, WireFormatLite::TYPE_UINT32>(
-            input, index, datap);
-      }
-      // Any case that reaches this point should have triggered an error
-      // already.
-      return errors::DataLoss("Failed reading TYPE_UINT32");
     case WireFormatLite::TYPE_ENUM:
-      return ReadPrimitive<int32, int32, WireFormatLite::TYPE_ENUM>(
+      return ReadPrimitive<int32_t, int32_t, WireFormatLite::TYPE_ENUM>(
           input, index, datap);
     case WireFormatLite::TYPE_SFIXED32:
-      return ReadPrimitive<int32, int32, WireFormatLite::TYPE_SFIXED32>(
-          input, index, datap);
+      switch (dtype) {
+        case DataType::DT_INT64:
+          return ReadPrimitive<int32_t, int64_t, WireFormatLite::TYPE_SFIXED32>(
+              input, index, datap);
+        case DataType::DT_INT32:
+          return ReadPrimitive<int32_t, int32_t, WireFormatLite::TYPE_SFIXED32>(
+              input, index, datap);
+        default:
+          return absl::DataLossError(absl::StrCat(
+              "Failed reading TYPE_SFIXED32 for ", DataTypeString(dtype)));
+      }
     case WireFormatLite::TYPE_SFIXED64:
-      return ReadPrimitive<protobuf_int64, int64,
+      return ReadPrimitive<protobuf_int64, int64_t,
                            WireFormatLite::TYPE_SFIXED64>(input, index, datap);
     case WireFormatLite::TYPE_SINT32:
-      return ReadPrimitive<int32, int32, WireFormatLite::TYPE_SINT32>(
-          input, index, datap);
+      switch (dtype) {
+        case DataType::DT_INT64:
+          return ReadPrimitive<int32_t, int64_t, WireFormatLite::TYPE_SINT32>(
+              input, index, datap);
+        case DataType::DT_INT32:
+          return ReadPrimitive<int32_t, int32_t, WireFormatLite::TYPE_SINT32>(
+              input, index, datap);
+        default:
+          return absl::DataLossError(absl::StrCat(
+              "Failed reading TYPE_SINT32 for ", DataTypeString(dtype)));
+      }
     case WireFormatLite::TYPE_SINT64:
-      return ReadPrimitive<protobuf_int64, int64, WireFormatLite::TYPE_SINT64>(
-          input, index, datap);
+      return ReadPrimitive<protobuf_int64, int64_t,
+                           WireFormatLite::TYPE_SINT64>(input, index, datap);
       // default: intentionally omitted in order to enable static checking.
   }
   // Unreachable.
-  return errors::DataLoss("Failed reading unknown wire type");
+  return absl::DataLossError("Failed reading unknown wire type");
 }
 
 // Reads and stores a length-delimited list of values.
-inline Status ReadPackedFromArray(const void* buf, size_t buf_size,
-                                  const WireFormatLite::FieldType field_type,
-                                  const int field_number, const DataType dtype,
-                                  const int stride, int* index, void* data) {
-  // Dispatch to the appropriately typed field reader based on the
-  // schema type.
+inline absl::Status ReadPackedFromArray(
+    const void* buf, size_t buf_size,
+    const WireFormatLite::FieldType field_type, const int field_number,
+    const DataType dtype, const int stride, const int data_size, int* index,
+    void* data) {
+  // Dispatch to the appropriately typed field reader based on the schema type.
   switch (field_type) {
     case WireFormatLite::TYPE_DOUBLE:
-      *index += ReadPackedPrimitives<double, WireFormatLite::TYPE_DOUBLE>(
-          buf, buf_size, *index, stride, data);
-      return Status::OK();
+      return AdvancePackedIndex(
+          ReadPackedPrimitives<double, WireFormatLite::TYPE_DOUBLE>(
+              buf, buf_size, *index, stride, data_size, data),
+          index);
     case WireFormatLite::TYPE_FLOAT:
-      *index += ReadPackedPrimitives<float, WireFormatLite::TYPE_FLOAT>(
-          buf, buf_size, *index, stride, data);
-      return Status::OK();
+      switch (dtype) {
+        case DataType::DT_DOUBLE:
+          return AdvancePackedIndex(
+              ReadPackedPrimitives<double, WireFormatLite::TYPE_FLOAT>(
+                  buf, buf_size, *index, stride, data_size, data),
+              index);
+        case DataType::DT_FLOAT:
+          return AdvancePackedIndex(
+              ReadPackedPrimitives<float, WireFormatLite::TYPE_FLOAT>(
+                  buf, buf_size, *index, stride, data_size, data),
+              index);
+        default:
+          return absl::DataLossError(absl::StrCat(
+              "Failed reading TYPE_FLOAT for ", DataTypeString(dtype)));
+      }
     case WireFormatLite::TYPE_INT64:
-      *index += ReadPackedPrimitives<int64, WireFormatLite::TYPE_INT64>(
-          buf, buf_size, *index, stride, data);
-      return Status::OK();
+      return AdvancePackedIndex(
+          ReadPackedPrimitives<int64_t, WireFormatLite::TYPE_INT64>(
+              buf, buf_size, *index, stride, data_size, data),
+          index);
     case WireFormatLite::TYPE_UINT64:
-      *index += ReadPackedPrimitives<int64, WireFormatLite::TYPE_UINT64>(
-          buf, buf_size, *index, stride, data);
-      return Status::OK();
+      return AdvancePackedIndex(
+          ReadPackedPrimitives<uint64_t, WireFormatLite::TYPE_UINT64>(
+              buf, buf_size, *index, stride, data_size, data),
+          index);
     case WireFormatLite::TYPE_INT32:
-      *index += ReadPackedPrimitives<int32, WireFormatLite::TYPE_INT32>(
-          buf, buf_size, *index, stride, data);
-      return Status::OK();
+      switch (dtype) {
+        case DataType::DT_INT64:
+          return AdvancePackedIndex(
+              ReadPackedPrimitives<int64_t, WireFormatLite::TYPE_INT32>(
+                  buf, buf_size, *index, stride, data_size, data),
+              index);
+        case DataType::DT_INT32:
+          return AdvancePackedIndex(
+              ReadPackedPrimitives<int32_t, WireFormatLite::TYPE_INT32>(
+                  buf, buf_size, *index, stride, data_size, data),
+              index);
+        default:
+          return absl::DataLossError(absl::StrCat(
+              "Failed reading TYPE_INT32 for ", DataTypeString(dtype)));
+      }
     case WireFormatLite::TYPE_FIXED64:
-      *index += ReadPackedPrimitives<int64, WireFormatLite::TYPE_FIXED64>(
-          buf, buf_size, *index, stride, data);
-      return Status::OK();
+      return AdvancePackedIndex(
+          ReadPackedPrimitives<uint64_t, WireFormatLite::TYPE_FIXED64>(
+              buf, buf_size, *index, stride, data_size, data),
+          index);
     case WireFormatLite::TYPE_FIXED32:
-      if (dtype == DataType::DT_INT64) {
-        *index += ReadPackedPrimitives<int64, WireFormatLite::TYPE_FIXED32>(
-            buf, buf_size, *index, stride, data);
-        return Status::OK();
+      switch (dtype) {
+        case DataType::DT_UINT64:
+          return AdvancePackedIndex(
+              ReadPackedPrimitives<uint64_t, WireFormatLite::TYPE_FIXED32>(
+                  buf, buf_size, *index, stride, data_size, data),
+              index);
+        case DataType::DT_UINT32:
+          return AdvancePackedIndex(
+              ReadPackedPrimitives<uint32_t, WireFormatLite::TYPE_FIXED32>(
+                  buf, buf_size, *index, stride, data_size, data),
+              index);
+        default:
+          return absl::DataLossError(absl::StrCat(
+              "Failed reading TYPE_FIXED32 for ", DataTypeString(dtype)));
       }
-      if (dtype == DataType::DT_INT32) {
-        *index += ReadPackedPrimitives<int32, WireFormatLite::TYPE_FIXED32>(
-            buf, buf_size, *index, stride, data);
-        return Status::OK();
-      }
-      // Any case that reaches this point should have triggered an error
-      // already.
-      return errors::DataLoss("Failed reading TYPE_FIXED32");
     case WireFormatLite::TYPE_BOOL:
-      *index += ReadPackedPrimitives<bool, WireFormatLite::TYPE_BOOL>(
-          buf, buf_size, *index, stride, data);
-      return Status::OK();
+      return AdvancePackedIndex(
+          ReadPackedPrimitives<bool, WireFormatLite::TYPE_BOOL>(
+              buf, buf_size, *index, stride, data_size, data),
+          index);
     case WireFormatLite::TYPE_STRING:
     case WireFormatLite::TYPE_GROUP:
     case WireFormatLite::TYPE_MESSAGE:
     case WireFormatLite::TYPE_BYTES:
-      return errors::DataLoss("Non-primitive type encountered as packed");
+      return absl::DataLossError("Non-primitive type encountered as packed");
     case WireFormatLite::TYPE_UINT32:
-      if (dtype == DataType::DT_INT64) {
-        *index += ReadPackedPrimitives<int64, WireFormatLite::TYPE_UINT32>(
-            buf, buf_size, *index, stride, data);
-        return Status::OK();
+      switch (dtype) {
+        case DataType::DT_UINT64:
+          return AdvancePackedIndex(
+              ReadPackedPrimitives<uint64_t, WireFormatLite::TYPE_UINT32>(
+                  buf, buf_size, *index, stride, data_size, data),
+              index);
+        case DataType::DT_UINT32:
+          return AdvancePackedIndex(
+              ReadPackedPrimitives<uint32_t, WireFormatLite::TYPE_UINT32>(
+                  buf, buf_size, *index, stride, data_size, data),
+              index);
+        default:
+          return absl::DataLossError(absl::StrCat(
+              "Failed reading TYPE_UINT32 for ", DataTypeString(dtype)));
       }
-      if (dtype == DataType::DT_INT32) {
-        *index += ReadPackedPrimitives<int32, WireFormatLite::TYPE_UINT32>(
-            buf, buf_size, *index, stride, data);
-        return Status::OK();
-      }
-      // Any case that reaches this point should have triggered an error
-      // already.
-      return errors::DataLoss("Failed reading TYPE_UINT32");
     case WireFormatLite::TYPE_ENUM:
-      *index += ReadPackedPrimitives<int32, WireFormatLite::TYPE_ENUM>(
-          buf, buf_size, *index, stride, data);
-      return Status::OK();
+      return AdvancePackedIndex(
+          ReadPackedPrimitives<int32_t, WireFormatLite::TYPE_ENUM>(
+              buf, buf_size, *index, stride, data_size, data),
+          index);
     case WireFormatLite::TYPE_SFIXED32:
-      *index += ReadPackedPrimitives<int32, WireFormatLite::TYPE_SFIXED32>(
-          buf, buf_size, *index, stride, data);
-      return Status::OK();
-
+      switch (dtype) {
+        case DataType::DT_INT64:
+          return AdvancePackedIndex(
+              ReadPackedPrimitives<int64_t, WireFormatLite::TYPE_SFIXED32>(
+                  buf, buf_size, *index, stride, data_size, data),
+              index);
+        case DataType::DT_INT32:
+          return AdvancePackedIndex(
+              ReadPackedPrimitives<int32_t, WireFormatLite::TYPE_SFIXED32>(
+                  buf, buf_size, *index, stride, data_size, data),
+              index);
+        default:
+          return absl::DataLossError(absl::StrCat(
+              "Failed reading TYPE_INT32 for ", DataTypeString(dtype)));
+      }
     case WireFormatLite::TYPE_SFIXED64:
-      *index += ReadPackedPrimitives<int64, WireFormatLite::TYPE_SFIXED64>(
-          buf, buf_size, *index, stride, data);
-      return Status::OK();
+      return AdvancePackedIndex(
+          ReadPackedPrimitives<int64_t, WireFormatLite::TYPE_SFIXED64>(
+              buf, buf_size, *index, stride, data_size, data),
+          index);
 
     case WireFormatLite::TYPE_SINT32:
-      *index += ReadPackedPrimitives<int32, WireFormatLite::TYPE_SINT32>(
-          buf, buf_size, *index, stride, data);
-      return Status::OK();
-
+      switch (dtype) {
+        case DataType::DT_INT64:
+          return AdvancePackedIndex(
+              ReadPackedPrimitives<int64_t, WireFormatLite::TYPE_SINT32>(
+                  buf, buf_size, *index, stride, data_size, data),
+              index);
+        case DataType::DT_INT32:
+          return AdvancePackedIndex(
+              ReadPackedPrimitives<int32_t, WireFormatLite::TYPE_SINT32>(
+                  buf, buf_size, *index, stride, data_size, data),
+              index);
+        default:
+          return absl::DataLossError(absl::StrCat(
+              "Failed reading TYPE_SINT32 for ", DataTypeString(dtype)));
+      }
     case WireFormatLite::TYPE_SINT64:
-      *index += ReadPackedPrimitives<int64, WireFormatLite::TYPE_SINT64>(
-          buf, buf_size, *index, stride, data);
-      return Status::OK();
+      return AdvancePackedIndex(
+          ReadPackedPrimitives<int64_t, WireFormatLite::TYPE_SINT64>(
+              buf, buf_size, *index, stride, data_size, data),
+          index);
       // default: intentionally omitted in order to enable static checking.
   }
   // Unreachable.
-  return errors::DataLoss("Failed reading unknown wire type");
+  return absl::DataLossError("Failed reading unknown wire type");
 }
 
 // Reads a varint from the given buffer, write it to *value, and return the
@@ -524,14 +689,14 @@ inline Status ReadPackedFromArray(const void* buf, size_t buf_size,
 // Important: This routine may read as much as kMaxVarintBytes from
 // the buffer. It is the caller's responsibility to make sure that there is
 // enough space in the buffer.
-inline const uint8* ReadVarint64FromArray(const uint8* buffer, bool* ok,
-                                          uint64* value) {
-  const uint8* ptr = buffer;
-  uint32 b;
+inline const uint8_t* ReadVarint64FromArray(const uint8_t* buffer, bool* ok,
+                                            uint64_t* value) {
+  const uint8_t* ptr = buffer;
+  uint32_t b;
 
   // Splitting into 32-bit pieces gives better performance on 32-bit
   // processors.
-  uint32 part0 = 0, part1 = 0, part2 = 0;
+  uint32_t part0 = 0, part1 = 0, part2 = 0;
 
   b = *(ptr++);
   part0 = b;
@@ -581,8 +746,9 @@ inline const uint8* ReadVarint64FromArray(const uint8* buffer, bool* ok,
 
 done:
   *ok = true;
-  *value = (static_cast<uint64>(part0)) | (static_cast<uint64>(part1) << 28) |
-           (static_cast<uint64>(part2) << 56);
+  *value = (static_cast<uint64_t>(part0)) |
+           (static_cast<uint64_t>(part1) << 28) |
+           (static_cast<uint64_t>(part2) << 56);
   return ptr;
 }
 

@@ -16,6 +16,9 @@ limitations under the License.
 #ifndef TENSORFLOW_CORE_GRAPPLER_OPTIMIZERS_MEMORY_OPTIMIZER_H_
 #define TENSORFLOW_CORE_GRAPPLER_OPTIMIZERS_MEMORY_OPTIMIZER_H_
 
+#include <string>
+#include "tensorflow/core/grappler/clusters/cluster.h"
+#include "tensorflow/core/grappler/grappler_item.h"
 #include "tensorflow/core/grappler/optimizers/graph_optimizer.h"
 #include "tensorflow/core/protobuf/rewriter_config.pb.h"
 
@@ -32,22 +35,21 @@ class MemoryOptimizer : public GraphOptimizer {
   //   RewriterConfig::memory_optimizer_target_node_name_scope.
   explicit MemoryOptimizer(
       RewriterConfig::MemOptType optimization_level,
-      const string& recomputation_targets_name_scope = "gradients/")
+      const std::string& recomputation_targets_name_scope = "gradients/")
       : optimization_level_(optimization_level),
         recomputation_targets_name_scope_(recomputation_targets_name_scope) {}
   ~MemoryOptimizer() override {}
 
-  string name() const override { return "memory_optimizer"; };
+  std::string name() const override { return "memory_optimizer"; };
 
-  Status Optimize(Cluster* cluster, const GrapplerItem& item,
-                  GraphDef* pruned_graph) override;
+  bool UsesFunctionLibrary() const override { return false; }
 
-  void Feedback(Cluster* cluster, const GrapplerItem& item,
-                const GraphDef& pruned_graph, double result) override;
+  absl::Status Optimize(Cluster* cluster, const GrapplerItem& item,
+                        GraphDef* pruned_graph) override;
 
  private:
   RewriterConfig::MemOptType optimization_level_;
-  string recomputation_targets_name_scope_;
+  std::string recomputation_targets_name_scope_;
 };
 
 }  // end namespace grappler

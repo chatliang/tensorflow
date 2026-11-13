@@ -18,7 +18,8 @@ limitations under the License.
 
 #define EIGEN_USE_GPU
 
-#include "third_party/eigen3/unsupported/Eigen/CXX11/Tensor"
+#include "absl/status/status.h"
+#include "unsupported/Eigen/CXX11/Tensor"  // from @eigen_archive
 #include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/framework/tensor_types.h"
 #include "tensorflow/core/kernels/gpu_utils.h"
@@ -30,16 +31,18 @@ typedef Eigen::GpuDevice GPUDevice;
 
 template <typename T>
 struct BiasGPU {
-  static void compute(const GPUDevice& d, const T* input, const T* bias,
-                      T* output, int32 batch, int32 height, int32 width,
-                      int32 channel, TensorFormat data_format);
+  static absl::Status compute(const GPUDevice& d, const T* input, const T* bias,
+                              T* output, int32_t batch, int32_t height,
+                              int32_t width, int32_t depth, int32_t channel,
+                              TensorFormat data_format);
 };
 
 template <typename T>
 struct BiasGradGPU {
-  static void compute(const GPUDevice& device, const T* output_backprop,
-                      T* bias_backprop, int32 batch, int32 height, int32 width,
-                      int32 channel, TensorFormat data_format);
+  static absl::Status compute(const GPUDevice& device, const T* output_backprop,
+                              T* bias_backprop, int32_t batch, int32_t height,
+                              int32_t width, int32_t depth, int32_t channel,
+                              TensorFormat data_format);
 
   static void DoRowReduction(OpKernelContext* context, T* output,
                              const T* input, int rows, int cols);
@@ -67,64 +70,12 @@ class BiasGradGPUProfileResult {
   }
   BiasAddGradGPUMode algorithm() const { return algorithm_; }
   void set_algorithm(BiasAddGradGPUMode val) { algorithm_ = val; }
-  uint64 elapsed_time() const { return elapsed_time_; }
-  void set_elapsed_time(uint64 val) { elapsed_time_ = val; }
+  uint64_t elapsed_time() const { return elapsed_time_; }
+  void set_elapsed_time(uint64_t val) { elapsed_time_ = val; }
 
  private:
   BiasAddGradGPUMode algorithm_ = BiasAddGradGPUMode::kInvalid;
-  uint64 elapsed_time_ = std::numeric_limits<uint64>::max();
-};
-
-// Encapsulate all the shape information that is used in bias add grad
-// operations.
-class BiasAddParams {
- public:
-  // We use a list to maintain both the shape value and the order (data format).
-  using SpatialArray = gtl::InlinedVector<int64, 4>;
-  BiasAddParams(const SpatialArray& in_shape, TensorFormat data_format,
-                DataType dtype, int device_id)
-      : in_shape_(in_shape),
-        data_format_(data_format),
-        dtype_(dtype),
-        device_id_(device_id) {
-    for (int64 val : in_shape_) {
-      hash_code_ = Hash64Combine(hash_code_, val);
-    }
-    hash_code_ = Hash64Combine(hash_code_, data_format);
-    hash_code_ = Hash64Combine(hash_code_, dtype);
-    hash_code_ = Hash64Combine(hash_code_, device_id);
-  }
-  bool operator==(const BiasAddParams& other) const {
-    return this->get_data_as_tuple() == other.get_data_as_tuple();
-  }
-
-  bool operator!=(const BiasAddParams& other) const {
-    return !(*this == other);
-  }
-  uint64 hash() const { return hash_code_; }
-
-  string ToString() const {
-    // clang-format off
-    return strings::StrCat(
-        "(", str_util::Join(in_shape_, ", "), "), ",
-        data_format_, ", ", dtype_, ", ", device_id_);
-    // clang-format on
-  }
-
- protected:
-  using ParamsDataType = std::tuple<SpatialArray, TensorFormat, DataType, int>;
-
-  ParamsDataType get_data_as_tuple() const {
-    return std::make_tuple(in_shape_, data_format_, dtype_, device_id_);
-  }
-
-  uint64 hash_code_ = 0;
-
- private:
-  SpatialArray in_shape_;
-  TensorFormat data_format_;
-  DataType dtype_;
-  int device_id_;
+  uint64_t elapsed_time_ = std::numeric_limits<uint64_t>::max();
 };
 
 }  // namespace tensorflow

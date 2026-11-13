@@ -15,16 +15,23 @@ limitations under the License.
 
 #include "tensorflow/core/grappler/optimizers/memory_optimizer.h"
 
+#include <memory>
+#include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "tensorflow/cc/ops/standard_ops.h"
+#include "tensorflow/core/framework/graph.pb.h"
 #include "tensorflow/core/framework/node_def.pb.h"
+#include "tensorflow/core/framework/tensor.h"
 #include "tensorflow/core/framework/tensor_testutil.h"
 #include "tensorflow/core/grappler/clusters/virtual_cluster.h"
 #include "tensorflow/core/grappler/grappler_item.h"
 #include "tensorflow/core/grappler/utils.h"
 #include "tensorflow/core/grappler/utils/grappler_test.h"
 #include "tensorflow/core/lib/core/status_test_util.h"
+#include "tensorflow/core/platform/types.h"
+#include "tensorflow/core/protobuf/device_properties.pb.h"
 
 namespace tensorflow {
 namespace grappler {
@@ -51,7 +58,7 @@ TEST_F(RecomputeSubgraphTest, SimpleSubgraph) {
 
   MemoryOptimizer optimizer(RewriterConfig::MANUAL);
   GraphDef output;
-  Status status = optimizer.Optimize(nullptr, item, &output);
+  absl::Status status = optimizer.Optimize(nullptr, item, &output);
 
   TF_EXPECT_OK(status);
   NodeMap post_transform_node_map(&output);
@@ -91,7 +98,7 @@ TEST_F(RecomputeSubgraphTest, NoFeedsRecomputed) {
 
   MemoryOptimizer optimizer(RewriterConfig::MANUAL);
   GraphDef output;
-  Status status = optimizer.Optimize(nullptr, item, &output);
+  absl::Status status = optimizer.Optimize(nullptr, item, &output);
 
   TF_EXPECT_OK(status);
   EXPECT_EQ(6, output.node_size());
@@ -117,7 +124,7 @@ TEST_F(RecomputeSubgraphTest, TwoInputSubgraphs) {
   MemoryOptimizer optimizer(RewriterConfig::MANUAL,
                             "some_name_scope/gradients");
   GraphDef output;
-  Status status = optimizer.Optimize(nullptr, item, &output);
+  absl::Status status = optimizer.Optimize(nullptr, item, &output);
 
   TF_EXPECT_OK(status);
   NodeMap post_transform_node_map(&output);
@@ -156,7 +163,7 @@ TEST_F(RecomputeSubgraphTest, MultiNode) {
 
   MemoryOptimizer optimizer(RewriterConfig::RECOMPUTATION_HEURISTICS);
   GraphDef first_pass_output;
-  Status first_pass_status =
+  absl::Status first_pass_status =
       optimizer.Optimize(nullptr, item, &first_pass_output);
   TF_EXPECT_OK(first_pass_status);
 
@@ -194,6 +201,63 @@ TEST_F(RecomputeSubgraphTest, MultiNode) {
   EXPECT_EQ("^gradients/BN1Grad", recompute_trigger_c->input(0));
 }
 
+TEST_F(RecomputeSubgraphTest, DynamicHeuristicRecomputation) {
+  {
+    tensorflow::Scope s = tensorflow::Scope::NewRootScope();
+    Output a = ops::Variable(s.WithOpName("a"), {2, 3, 4}, DT_FLOAT);
+    Output b = ops::Identity(s.WithOpName("b"), a);
+    Output c = ops::AddN(s.WithOpName("gradients/c"), {b});
+
+    GrapplerItem item;
+    TF_CHECK_OK(s.ToGraphDef(&item.graph));
+
+    MemoryOptimizer optimizer(RewriterConfig::RECOMPUTATION_HEURISTICS);
+    GraphDef output;
+    TF_EXPECT_OK(optimizer.Optimize(nullptr, item, &output));
+
+    NodeMap post_transform_node_map(&output);
+    EXPECT_EQ(post_transform_node_map.GetNode("Recomputed/b"), nullptr);
+  }
+
+  {
+    tensorflow::Scope s = tensorflow::Scope::NewRootScope();
+    Output a = ops::Variable(s.WithOpName("a"), {2, 3, 4}, DT_FLOAT);
+    Output b = ops::Identity(s.WithOpName("b"), a);
+    Output c = ops::AddN(s.WithOpName("gradients/c"), {b});
+
+    GrapplerItem item;
+    TF_CHECK_OK(s.ToGraphDef(&item.graph));
+    NodeMap pre_transform_node_map(&item.graph);
+    pre_transform_node_map.GetNode("b")->set_op("Relu");
+
+    MemoryOptimizer optimizer(RewriterConfig::RECOMPUTATION_HEURISTICS);
+    GraphDef output;
+    TF_EXPECT_OK(optimizer.Optimize(nullptr, item, &output));
+
+    NodeMap post_transform_node_map(&output);
+    EXPECT_NE(post_transform_node_map.GetNode("Recomputed/b"), nullptr);
+  }
+
+  {
+    tensorflow::Scope s = tensorflow::Scope::NewRootScope();
+    Output a = ops::Variable(s.WithOpName("a"), {1000, 1000}, DT_FLOAT);
+    Output b = ops::Identity(s.WithOpName("b"), a);
+    Output c = ops::AddN(s.WithOpName("gradients/c"), {b});
+
+    GrapplerItem item;
+    TF_CHECK_OK(s.ToGraphDef(&item.graph));
+    NodeMap pre_transform_node_map(&item.graph);
+    pre_transform_node_map.GetNode("b")->set_op("Relu");
+
+    MemoryOptimizer optimizer(RewriterConfig::RECOMPUTATION_HEURISTICS);
+    GraphDef output;
+    TF_EXPECT_OK(optimizer.Optimize(nullptr, item, &output));
+
+    NodeMap post_transform_node_map(&output);
+    EXPECT_EQ(post_transform_node_map.GetNode("Recomputed/b"), nullptr);
+  }
+}
+
 class MemoryOptimizerTest : public GrapplerTest {
  public:
   static std::unique_ptr<VirtualCluster> CreateVirtualCluster() {
@@ -210,7 +274,7 @@ class MemoryOptimizerTest : public GrapplerTest {
     gpu_device.set_bandwidth(128);
     gpu_device.set_memory_size(1024 * 1024);
     gpu_device.mutable_environment()->insert({"architecture", "6"});
-    std::unordered_map<string, DeviceProperties> devices;
+    std::unordered_map<std::string, DeviceProperties> devices;
     devices["/job:localhost/replica:0/task:0/cpu:0"] = cpu_device;
     devices["/job:localhost/replica:0/task:0/gpu:0"] = gpu_device;
     return std::unique_ptr<VirtualCluster>(new VirtualCluster(devices));
@@ -233,6 +297,7 @@ TEST_F(MemoryOptimizerTest, SimpleSwapping) {
 
   GrapplerItem item;
   TF_CHECK_OK(s.ToGraphDef(&item.graph));
+  item.fetch = {"e"};
 
   EXPECT_EQ(7, item.graph.node_size());
   EXPECT_EQ(NodeName(e.name()), item.graph.node(4).name());
@@ -244,7 +309,7 @@ TEST_F(MemoryOptimizerTest, SimpleSwapping) {
 
   MemoryOptimizer optimizer(RewriterConfig::MANUAL);
   GraphDef output;
-  Status status = optimizer.Optimize(cluster.get(), item, &output);
+  absl::Status status = optimizer.Optimize(cluster.get(), item, &output);
   TF_EXPECT_OK(status);
 
   EXPECT_EQ(9, output.node_size());
@@ -272,15 +337,15 @@ TEST_F(MemoryOptimizerTest, SimpleSwapping) {
   EXPECT_EQ("^swap_out_e_0", new_c.input(1));
 
   // Run the optimizer a second time to ensure it's idempotent.
-  GrapplerItem item_copy(item, std::move(output));
+  GrapplerItem item_copy = item.WithGraph(std::move(output));
   status = optimizer.Optimize(cluster.get(), item_copy, &output);
   TF_EXPECT_OK(status);
 
-#if GOOGLE_CUDA
+#if GOOGLE_CUDA || TENSORFLOW_USE_ROCM
   item.fetch = {"e"};
   item.init_ops = {init.name()};
   auto tensors_expected = EvaluateFetchNodes(item);
-  GrapplerItem optimized(item, std::move(output));
+  GrapplerItem optimized = item.WithGraph(std::move(output));
   auto tensors = EvaluateFetchNodes(optimized);
   test::ExpectTensorEqual<float>(tensors_expected[0], tensors[0]);
 #endif
@@ -314,7 +379,7 @@ TEST_F(MemoryOptimizerTest, SwappingHeuristics) {
 
   MemoryOptimizer optimizer(RewriterConfig::SWAPPING_HEURISTICS);
   GraphDef output;
-  Status status = optimizer.Optimize(cluster.get(), item, &output);
+  absl::Status status = optimizer.Optimize(cluster.get(), item, &output);
   TF_EXPECT_OK(status);
 
   for (const auto& node : output.node()) {
@@ -328,9 +393,9 @@ TEST_F(MemoryOptimizerTest, SwappingHeuristics) {
     }
   }
 
-#if GOOGLE_CUDA
+#if GOOGLE_CUDA || TENSORFLOW_USE_ROCM
   auto tensors_expected = EvaluateFetchNodes(item);
-  GrapplerItem optimized(item, std::move(output));
+  GrapplerItem optimized = item.WithGraph(std::move(output));
   auto tensors = EvaluateFetchNodes(optimized);
   for (int i = 0; i < item.fetch.size(); ++i) {
     test::ExpectTensorEqual<float>(tensors_expected[i], tensors[i]);
@@ -365,7 +430,7 @@ TEST_F(MemoryOptimizerTest, UnswappableInputs) {
 
   MemoryOptimizer optimizer(RewriterConfig::SWAPPING_HEURISTICS);
   GraphDef output;
-  Status status = optimizer.Optimize(cluster.get(), item, &output);
+  absl::Status status = optimizer.Optimize(cluster.get(), item, &output);
   TF_EXPECT_OK(status);
 
   for (const auto& node : output.node()) {
@@ -377,9 +442,9 @@ TEST_F(MemoryOptimizerTest, UnswappableInputs) {
     }
   }
 
-#if GOOGLE_CUDA
+#if GOOGLE_CUDA || TENSORFLOW_USE_ROCM
   auto tensors_expected = EvaluateFetchNodes(item);
-  GrapplerItem optimized(item, std::move(output));
+  GrapplerItem optimized = item.WithGraph(std::move(output));
   auto tensors = EvaluateFetchNodes(optimized);
   test::ExpectTensorEqual<float>(tensors_expected[0], tensors[0]);
 #endif
@@ -403,7 +468,7 @@ TEST_F(MemoryOptimizerTest, AccumulationRewrites) {
   std::unique_ptr<VirtualCluster> cluster(CreateVirtualCluster());
   MemoryOptimizer optimizer(RewriterConfig::SCHEDULING_HEURISTICS);
   GraphDef output;
-  Status status = optimizer.Optimize(cluster.get(), item, &output);
+  absl::Status status = optimizer.Optimize(cluster.get(), item, &output);
   TF_EXPECT_OK(status);
 
   int count = 0;
@@ -425,7 +490,7 @@ TEST_F(MemoryOptimizerTest, AccumulationRewrites) {
   }
   EXPECT_EQ(4, count);
 
-  std::vector<string> fetch = {"a", "b", "c", "e"};
+  std::vector<std::string> fetch = {"a", "b", "c", "e"};
   auto tensors = EvaluateNodes(output, fetch, {});
   EXPECT_EQ(4, tensors.size());
 
@@ -467,7 +532,7 @@ TEST_F(RelaxAllocatorConstraintsTest, SameDevice) {
   item.fetch = {"exp"};
   item.init_ops = {"variable"};
   auto tensors_expected = EvaluateFetchNodes(item);
-  GrapplerItem optimized(item, std::move(output));
+  GrapplerItem optimized = item.WithGraph(std::move(output));
   auto tensors = EvaluateFetchNodes(optimized);
   test::ExpectTensorEqual<float>(tensors_expected[0], tensors[0]);
 }
@@ -494,14 +559,39 @@ TEST_F(RelaxAllocatorConstraintsTest, DifferentDevice) {
   auto node = output.node(2);
   EXPECT_EQ("assign", node.name());
   EXPECT_EQ(0, node.attr().count("_grappler_relax_allocator_constraints"));
-#if GOOGLE_CUDA
+#if GOOGLE_CUDA || TENSORFLOW_USE_ROCM
   item.fetch = {"exp"};
   item.init_ops = {"variable"};
   auto tensors_expected = EvaluateFetchNodes(item);
-  GrapplerItem optimized(item, std::move(output));
+  GrapplerItem optimized = item.WithGraph(std::move(output));
   auto tensors = EvaluateFetchNodes(optimized);
   test::ExpectTensorEqual<float>(tensors_expected[0], tensors[0]);
 #endif
+}
+
+TEST_F(RelaxAllocatorConstraintsTest, SameDeviceType) {
+  tensorflow::Scope s = tensorflow::Scope::NewRootScope();
+  Output constant = ops::Const(s.WithOpName("constant").WithDevice("/cpu:0"),
+                               -3.14f, {128, 128});
+  Output variable = ops::Variable(s.WithOpName("variable").WithDevice("/cpu:0"),
+                                  {128, 128}, DT_FLOAT);
+  Output assign = ops::Assign(s.WithOpName("assign").WithDevice("/cpu:0"),
+                              variable, constant);
+  // Assign and Exp run on different devices, but do not straddle a CPU:GPU
+  // boundary, so we can we do not need to enforce allocation in pinned memory.
+  Output exp = ops::Exp(s.WithOpName("exp").WithDevice("/cpu:1"), assign);
+
+  GrapplerItem item;
+  TF_CHECK_OK(s.ToGraphDef(&item.graph));
+
+  MemoryOptimizer optimizer(RewriterConfig::MANUAL);
+  GraphDef output;
+  TF_EXPECT_OK(optimizer.Optimize(nullptr, item, &output));
+
+  auto node = output.node(2);
+  EXPECT_EQ("assign", node.name());
+  EXPECT_EQ(1, node.attr().count("_grappler_relax_allocator_constraints"));
+  EXPECT_TRUE(node.attr().at("_grappler_relax_allocator_constraints").b());
 }
 
 TEST_F(RelaxAllocatorConstraintsTest, SendNode) {
@@ -538,16 +628,36 @@ TEST_F(RelaxAllocatorConstraintsTest, AssignNodeInFanout) {
       s.WithOpName("variable0").WithDevice("/cpu:0"), {128, 128}, DT_FLOAT);
   Output assign0 = ops::Assign(s.WithOpName("assign0").WithDevice("/cpu:0"),
                                variable0, constant0);
+  Output assign2 = ops::Assign(s.WithOpName("assign2").WithDevice("/cpu:0"),
+                               variable0, constant0);
+  Output assign3 = ops::Assign(s.WithOpName("assign3").WithDevice("/cpu:0"),
+                               variable0, constant0);
+  Output assign4 = ops::Assign(s.WithOpName("assign4").WithDevice("/cpu:0"),
+                               variable0, constant0);
+  // Rank does not forward its input buffer, so assign3 can be relaxed.
+  Output rank_cpu =
+      ops::Rank(s.WithOpName("rank_cpu").WithDevice("/cpu:0"), assign3);
+  // Exp could forward its input buffer, so we cannot relax assign4.
+  Output exp_cpu =
+      ops::Exp(s.WithOpName("exp_cpu").WithDevice("/cpu:0"), assign4);
+
   // The rest of the graph is on a second device, so we can relax the
-  // constraint for assign1, but not for assign0.
-  Output exp1 = ops::Exp(s.WithOpName("exp1").WithDevice("/gpu:0"), assign0);
-  Output variable1 = ops::Variable(
-      s.WithOpName("variable1").WithDevice("/gpu:0"), {128, 128}, DT_FLOAT);
-  Output assign1 = ops::Assign(s.WithOpName("assign1").WithDevice("/gpu:0"),
-                               variable1, exp1);
+  // constraint for assign1, but not for assign0. Assign2 only has a
+  // control dependency crossing the device boundary, so it can be relaxed too.
+  Output rank_gpu = ops::Rank(s.WithOpName("rank_gpu")
+                                  .WithDevice("/gpu:0")
+                                  .WithControlDependencies(assign2),
+                              assign0);
+  Output id_gpu = ops::Identity(s.WithOpName("id_gpu"), rank_cpu);
+  Output id_gpu2 = ops::Identity(s.WithOpName("id_gpu2"), exp_cpu);
+  Output variable_gpu = ops::Variable(
+      s.WithOpName("variable_gpu").WithDevice("/gpu:0"), {128, 128}, DT_FLOAT);
+  Output assign_gpu = ops::Assign(
+      s.WithOpName("assign_gpu").WithDevice("/gpu:0"), variable_gpu, exp_cpu);
 
   GrapplerItem item;
   TF_CHECK_OK(s.ToGraphDef(&item.graph));
+  item.fetch = {"assign0", "assign_gpu", "rank_gpu", "id_gpu", "id_gpu2"};
 
   MemoryOptimizer optimizer(RewriterConfig::MANUAL);
   GraphDef output;
@@ -557,19 +667,36 @@ TEST_F(RelaxAllocatorConstraintsTest, AssignNodeInFanout) {
   EXPECT_EQ("assign0", node.name());
   EXPECT_EQ(0, node.attr().count("_grappler_relax_allocator_constraints"));
 
-  node = output.node(5);
-  EXPECT_EQ("assign1", node.name());
+  node = output.node(4);
+  EXPECT_EQ("assign2", node.name());
   EXPECT_EQ(1, node.attr().count("_grappler_relax_allocator_constraints"));
   EXPECT_EQ(true, node.attr().at("_grappler_relax_allocator_constraints").b());
 
-#if GOOGLE_CUDA
-  item.fetch = {"assign0", "assign1"};
-  item.init_ops = {"exp1", "variable1"};
+  node = output.node(5);
+  EXPECT_EQ("assign3", node.name());
+  EXPECT_EQ(1, node.attr().count("_grappler_relax_allocator_constraints"));
+  EXPECT_EQ(true, node.attr().at("_grappler_relax_allocator_constraints").b());
+
+  node = output.node(6);
+  EXPECT_EQ("assign4", node.name());
+  EXPECT_EQ(0, node.attr().count("_grappler_relax_allocator_constraints"));
+
+  node = output.node(12);
+  EXPECT_EQ("assign_gpu", node.name());
+  EXPECT_EQ(1, node.attr().count("_grappler_relax_allocator_constraints"));
+  EXPECT_EQ(true, node.attr().at("_grappler_relax_allocator_constraints").b());
+
+#if GOOGLE_CUDA || TENSORFLOW_USE_ROCM
+  item.init_ops = {"exp_cpu", "variable_gpu"};
   auto tensors_expected = EvaluateFetchNodes(item);
-  GrapplerItem optimized(item, std::move(output));
+  GrapplerItem optimized = item.WithGraph(std::move(output));
   auto tensors = EvaluateFetchNodes(optimized);
   for (int i = 0; i < tensors_expected.size(); ++i) {
-    test::ExpectTensorEqual<float>(tensors_expected[i], tensors[i]);
+    if (i == 2 || i == 3) {
+      test::ExpectTensorEqual<int>(tensors_expected[i], tensors[i]);
+    } else {
+      test::ExpectTensorEqual<float>(tensors_expected[i], tensors[i]);
+    }
   }
 #endif
 }

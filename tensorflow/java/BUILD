@@ -1,20 +1,40 @@
+# Copyright 2026 The TensorFlow Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+
 # Description:
 # TensorFlow Java API.
 
-package(default_visibility = ["//visibility:private"])
-
-licenses(["notice"])  # Apache 2.0
-
-load(":build_defs.bzl", "JAVACOPTS")
-load(":src/gen/gen_ops.bzl", "tf_java_op_gen_srcjar")
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@rules_java//java:defs.bzl", "java_library", "java_plugin")
 load(
     "//tensorflow:tensorflow.bzl",
+    "VERSION",
     "tf_binary_additional_srcs",
     "tf_cc_binary",
+    "tf_cc_test",
     "tf_copts",
     "tf_custom_op_library",
     "tf_java_test",
-    "tf_cc_test",
+)
+load(":build_defs.bzl", "JAVACOPTS")
+load(":src/gen/gen_ops.bzl", "tf_java_op_gen_srcjar")
+
+package(
+    # copybara:uncomment default_applicable_licenses = ["//tensorflow:license"],
+    default_visibility = ["//visibility:private"],
+    licenses = ["notice"],
 )
 
 java_library(
@@ -23,10 +43,24 @@ java_library(
         ":java_op_sources",
         ":java_sources",
     ],
-    data = [":libtensorflow_jni"],
+    data = tf_binary_additional_srcs() + [":libtensorflow_jni"],
     javacopts = JAVACOPTS,
     plugins = [":processor"],
+    resources = [":java_resources"],
     visibility = ["//visibility:public"],
+)
+
+genrule(
+    name = "version-info",
+    outs = ["src/main/resources/tensorflow-version-info"],
+    cmd = "echo version=%s > $@" % VERSION,
+    output_to_bindir = 1,
+)
+
+filegroup(
+    name = "java_resources",
+    srcs = [":version-info"],
+    visibility = ["//visibility:private"],
 )
 
 # NOTE(ashankar): Rule to include the Java API in the Android Inference Library
@@ -37,10 +71,7 @@ filegroup(
         "src/main/java/org/tensorflow/*.java",
         "src/main/java/org/tensorflow/types/*.java",
     ]),
-    visibility = [
-        "//tensorflow/contrib/android:__pkg__",
-        "//tensorflow/java:__pkg__",
-    ],
+    visibility = ["//tensorflow/tools/android/inference_interface:__pkg__"],
 )
 
 java_plugin(
@@ -65,9 +96,7 @@ java_library(
 filegroup(
     name = "java_op_sources",
     srcs = glob(["src/main/java/org/tensorflow/op/**/*.java"]) + [":java_op_gen_sources"],
-    visibility = [
-        "//tensorflow/java:__pkg__",
-    ],
+    visibility = ["//visibility:private"],
 )
 
 tf_java_op_gen_srcjar(
@@ -86,7 +115,10 @@ tf_cc_binary(
         "src/gen/cc/op_gen_main.cc",
     ],
     copts = tf_copts(),
-    linkopts = ["-lm"],
+    linkopts = select({
+        "//tensorflow:windows": [],
+        "//conditions:default": ["-lm"],
+    }),
     linkstatic = 1,
     deps = [
         ":java_op_gen_lib",
@@ -94,6 +126,9 @@ tf_cc_binary(
         "//tensorflow/core:framework_internal",
         "//tensorflow/core:lib",
         "//tensorflow/core:ops",
+        "//tensorflow/core:protos_all_cc",
+        "@com_google_absl//absl/log:check",
+        "@xla//xla/tsl/platform:status",
     ],
 )
 
@@ -118,6 +153,11 @@ cc_library(
         "//tensorflow/core:lib_internal",
         "//tensorflow/core:op_gen_lib",
         "//tensorflow/core:protos_all_cc",
+        "@com_google_absl//absl/log",
+        "@com_google_absl//absl/log:check",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/strings",
+        "@com_google_absl//absl/strings:string_view",
         "@com_googlesource_code_re2//:re2",
     ],
 )
@@ -128,6 +168,45 @@ java_library(
     srcs = ["src/test/java/org/tensorflow/TestUtil.java"],
     javacopts = JAVACOPTS,
     deps = [":tensorflow"],
+)
+
+tf_java_test(
+    name = "EagerSessionTest",
+    size = "small",
+    srcs = ["src/test/java/org/tensorflow/EagerSessionTest.java"],
+    javacopts = JAVACOPTS,
+    test_class = "org.tensorflow.EagerSessionTest",
+    deps = [
+        ":tensorflow",
+        ":testutil",
+        "@junit",
+    ],
+)
+
+tf_java_test(
+    name = "EagerOperationBuilderTest",
+    size = "small",
+    srcs = ["src/test/java/org/tensorflow/EagerOperationBuilderTest.java"],
+    javacopts = JAVACOPTS,
+    test_class = "org.tensorflow.EagerOperationBuilderTest",
+    deps = [
+        ":tensorflow",
+        ":testutil",
+        "@junit",
+    ],
+)
+
+tf_java_test(
+    name = "EagerOperationTest",
+    size = "small",
+    srcs = ["src/test/java/org/tensorflow/EagerOperationTest.java"],
+    javacopts = JAVACOPTS,
+    test_class = "org.tensorflow.EagerOperationTest",
+    deps = [
+        ":tensorflow",
+        ":testutil",
+        "@junit",
+    ],
 )
 
 tf_java_test(
@@ -144,11 +223,11 @@ tf_java_test(
 )
 
 tf_java_test(
-    name = "OperationBuilderTest",
+    name = "GraphOperationBuilderTest",
     size = "small",
-    srcs = ["src/test/java/org/tensorflow/OperationBuilderTest.java"],
+    srcs = ["src/test/java/org/tensorflow/GraphOperationBuilderTest.java"],
     javacopts = JAVACOPTS,
-    test_class = "org.tensorflow.OperationBuilderTest",
+    test_class = "org.tensorflow.GraphOperationBuilderTest",
     deps = [
         ":tensorflow",
         ":testutil",
@@ -157,11 +236,11 @@ tf_java_test(
 )
 
 tf_java_test(
-    name = "OperationTest",
+    name = "GraphOperationTest",
     size = "small",
-    srcs = ["src/test/java/org/tensorflow/OperationTest.java"],
+    srcs = ["src/test/java/org/tensorflow/GraphOperationTest.java"],
     javacopts = JAVACOPTS,
-    test_class = "org.tensorflow.OperationTest",
+    test_class = "org.tensorflow.GraphOperationTest",
     deps = [
         ":tensorflow",
         ":testutil",
@@ -292,6 +371,45 @@ tf_java_test(
     ],
 )
 
+tf_java_test(
+    name = "GeneratedOperationsTest",
+    size = "small",
+    srcs = ["src/test/java/org/tensorflow/op/core/GeneratedOperationsTest.java"],
+    javacopts = JAVACOPTS,
+    test_class = "org.tensorflow.op.core.GeneratedOperationsTest",
+    deps = [
+        ":tensorflow",
+        ":testutil",
+        "@junit",
+    ],
+)
+
+tf_java_test(
+    name = "GradientsTest",
+    size = "small",
+    srcs = ["src/test/java/org/tensorflow/op/core/GradientsTest.java"],
+    javacopts = JAVACOPTS,
+    test_class = "org.tensorflow.op.core.GradientsTest",
+    deps = [
+        ":tensorflow",
+        ":testutil",
+        "@junit",
+    ],
+)
+
+tf_java_test(
+    name = "ZerosTest",
+    size = "small",
+    srcs = ["src/test/java/org/tensorflow/op/core/ZerosTest.java"],
+    javacopts = JAVACOPTS,
+    test_class = "org.tensorflow.op.core.ZerosTest",
+    deps = [
+        ":tensorflow",
+        ":testutil",
+        "@junit",
+    ],
+)
+
 filegroup(
     name = "processor_test_resources",
     srcs = glob([
@@ -320,7 +438,8 @@ tf_cc_test(
 filegroup(
     name = "libtensorflow_jni",
     srcs = select({
-        "//tensorflow:darwin": [":libtensorflow_jni.dylib"],
+        "//tensorflow:windows": [":tensorflow_jni.dll"],
+        "//tensorflow:macos": [":libtensorflow_jni.dylib"],
         "//conditions:default": [":libtensorflow_jni.so"],
     }),
     visibility = ["//visibility:public"],
@@ -331,28 +450,30 @@ LINKER_VERSION_SCRIPT = ":config/version_script.lds"
 LINKER_EXPORTED_SYMBOLS = ":config/exported_symbols.lds"
 
 tf_cc_binary(
-    name = "libtensorflow_jni.so",
+    name = "tensorflow_jni",
     # Set linker options to strip out anything except the JNI
     # symbols from the library. This reduces the size of the library
     # considerably (~50% as of January 2017).
     linkopts = select({
         "//tensorflow:debug": [],  # Disable all custom linker options in debug mode
-        "//tensorflow:darwin": [
-            "-Wl,-exported_symbols_list",  # This line must be directly followed by LINKER_EXPORTED_SYMBOLS
-            "$(location {})".format(LINKER_EXPORTED_SYMBOLS),
+        "//tensorflow:macos": [
+            "-Wl,-exported_symbols_list,$(location {})".format(LINKER_EXPORTED_SYMBOLS),
         ],
         "//tensorflow:windows": [],
-        "//tensorflow:windows_msvc": [],
         "//conditions:default": [
             "-z defs",
             "-s",
-            "-Wl,--version-script",  #  This line must be directly followed by LINKER_VERSION_SCRIPT
-            "$(location {})".format(LINKER_VERSION_SCRIPT),
+            "-Wl,--version-script,$(location {})".format(LINKER_VERSION_SCRIPT),
+            # copybara:uncomment_begin(google-only)
+            # "-Wl,--undefined-version",
+            # copybara:uncomment_end
         ],
     }),
     linkshared = 1,
     linkstatic = 1,
+    per_os_targets = True,
     deps = [
+        "//tensorflow/core/distributed_runtime/rpc:grpc_server_lib",
         "//tensorflow/java/src/main/native",
         LINKER_VERSION_SCRIPT,
         LINKER_EXPORTED_SYMBOLS,
@@ -371,15 +492,4 @@ tf_cc_binary(
     name = "generate_pom",
     srcs = ["generate_pom.cc"],
     deps = ["//tensorflow/c:c_api"],
-)
-
-# System.loadLibrary() on OS X looks for ".dylib" or ".jnilib"
-# and no ".so". If and when https://github.com/bazelbuild/bazel/issues/914
-# is resolved, perhaps this workaround rule can be removed.
-genrule(
-    name = "darwin-compat",
-    srcs = [":libtensorflow_jni.so"],
-    outs = ["libtensorflow_jni.dylib"],
-    cmd = "cp $< $@",
-    output_to_bindir = 1,
 )

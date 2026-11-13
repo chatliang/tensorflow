@@ -17,7 +17,6 @@ limitations under the License.
 
 // Place `<locale>` before <Python.h> to avoid build failure in macOS.
 #include <locale>
-#include <Python.h>
 
 #include "tensorflow/core/lib/core/errors.h"
 #include "tensorflow/core/lib/strings/strcat.h"
@@ -46,7 +45,7 @@ const char* ClassName(PyObject* py) {
 
 // Returns a PyObject containing a string, or null
 void TryAppendTraceback(PyObject* ptype, PyObject* pvalue, PyObject* ptraceback,
-                        string* out) {
+                        std::string* out) {
   // The "traceback" module is assumed to be imported already by script_ops.py.
   PyObject* tb_module = PyImport_AddModule("traceback");
 
@@ -85,7 +84,7 @@ void TryAppendTraceback(PyObject* ptype, PyObject* pvalue, PyObject* ptraceback,
 #if PY_MAJOR_VERSION < 3
     strings::StrAppend(out, PyString_AS_STRING(v), "\n");
 #else
-    strings::StrAppend(out, PyUnicode_AsUTF8(v), "\n");
+    absl::StrAppend(out, PyUnicode_AsUTF8(v), "\n");
 #endif
   }
 
@@ -93,7 +92,7 @@ void TryAppendTraceback(PyObject* ptype, PyObject* pvalue, PyObject* ptraceback,
   Py_DECREF(ret_val);
 }
 
-string PyExceptionFetch() {
+std::string PyExceptionFetch() {
   CHECK(PyErr_Occurred())
       << "Must only call PyExceptionFetch after an exception.";
   PyObject* ptype;
@@ -101,7 +100,7 @@ string PyExceptionFetch() {
   PyObject* ptraceback;
   PyErr_Fetch(&ptype, &pvalue, &ptraceback);
   PyErr_NormalizeException(&ptype, &pvalue, &ptraceback);
-  string err = ClassName(ptype);
+  std::string err = ClassName(ptype);
   if (pvalue) {
     PyObject* str = PyObject_Str(pvalue);
 
@@ -109,11 +108,11 @@ string PyExceptionFetch() {
 #if PY_MAJOR_VERSION < 3
       strings::StrAppend(&err, ": ", PyString_AS_STRING(str), "\n");
 #else
-      strings::StrAppend(&err, ": ", PyUnicode_AsUTF8(str), "\n");
+      absl::StrAppend(&err, ": ", PyUnicode_AsUTF8(str), "\n");
 #endif
       Py_DECREF(str);
     } else {
-      strings::StrAppend(&err, "(unknown error message)\n");
+      absl::StrAppend(&err, "(unknown error message)\n");
     }
 
     TryAppendTraceback(ptype, pvalue, ptraceback, &err);

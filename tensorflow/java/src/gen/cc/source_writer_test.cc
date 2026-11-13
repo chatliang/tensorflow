@@ -13,12 +13,15 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include <list>
-
-#include "tensorflow/core/lib/io/path.h"
-#include "tensorflow/core/platform/test.h"
-#include "tensorflow/java/src/gen/cc/java_defs.h"
 #include "tensorflow/java/src/gen/cc/source_writer.h"
+
+#include <list>
+#include <string>
+
+#include "tensorflow/core/platform/path.h"
+#include "tensorflow/core/platform/test.h"
+#include "tensorflow/core/platform/types.h"
+#include "tensorflow/java/src/gen/cc/java_defs.h"
 
 namespace tensorflow {
 namespace java {
@@ -264,9 +267,9 @@ TEST(StreamTest, Types) {
 
 TEST(StreamTest, FileSnippet) {
   SourceBufferWriter writer;
-  const string fname = tensorflow::io::JoinPath(
-      tensorflow::testing::TensorFlowSrcRoot(),
-      "java/src/gen/resources/test.java.snippet");
+  const std::string fname =
+      tensorflow::io::JoinPath(tensorflow::testing::TensorFlowSrcRoot(),
+                               "java/src/gen/resources/test.java.snippet");
 
   writer.WriteFromFile(fname)
         .BeginBlock()
@@ -361,7 +364,7 @@ TEST(WriteType, ParameterizedClassAndSupertypes) {
   clazz.add_parameter(type_t);
   Type type_u = Type::Generic("U").add_supertype(Type::Class("Number"));
   clazz.add_parameter(type_u);
-  clazz.add_supertype(Type::Interface("Parametrizable").add_parameter(type_u));
+  clazz.add_supertype(Type::Interface("Parameterizable").add_parameter(type_u));
   clazz.add_supertype(Type::Interface("Runnable"));
   clazz.add_supertype(Type::Class("SuperTest").add_parameter(type_t));
 
@@ -370,7 +373,7 @@ TEST(WriteType, ParameterizedClassAndSupertypes) {
   const char* expected =
       "package org.tensorflow;\n\n"
       "public class Test<T, U extends Number>"
-      " extends SuperTest<T> implements Parametrizable<U>, Runnable {\n}\n";
+      " extends SuperTest<T> implements Parameterizable<U>, Runnable {\n}\n";
   ASSERT_STREQ(expected, writer.str().data());
 }
 

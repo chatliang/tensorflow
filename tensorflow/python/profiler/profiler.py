@@ -14,10 +14,6 @@
 # ==============================================================================
 """profiler python module provides APIs to profile TensorFlow models.
 """
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 # pylint: disable=unused-import
 from tensorflow.core.profiler.tfprof_log_pb2 import OpLogProto
 from tensorflow.core.profiler.tfprof_output_pb2 import AdviceProto
@@ -49,7 +45,7 @@ _allowed_symbols.extend([
 ])
 
 # Export protos
-tf_export('profiler.GraphNodeProto')(GraphNodeProto)
-tf_export('profiler.MultiGraphNodeProto')(MultiGraphNodeProto)
-tf_export('profiler.AdviceProto')(AdviceProto)
-tf_export('profiler.OpLogProto')(OpLogProto)
+tf_export(v1=['profiler.GraphNodeProto'])(GraphNodeProto)
+tf_export(v1=['profiler.MultiGraphNodeProto'])(MultiGraphNodeProto)
+tf_export(v1=['profiler.AdviceProto'])(AdviceProto)
+tf_export(v1=['profiler.OpLogProto'])(OpLogProto)

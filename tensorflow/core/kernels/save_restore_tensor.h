@@ -13,8 +13,8 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#ifndef TENSORFLOW_KERNELS_SAVE_RESTORE_TENSOR_H_
-#define TENSORFLOW_KERNELS_SAVE_RESTORE_TENSOR_H_
+#ifndef TENSORFLOW_CORE_KERNELS_SAVE_RESTORE_TENSOR_H_
+#define TENSORFLOW_CORE_KERNELS_SAVE_RESTORE_TENSOR_H_
 
 #include "tensorflow/core/util/tensor_slice_reader.h"
 #include "tensorflow/core/util/tensor_slice_writer.h"
@@ -63,11 +63,11 @@ void RestoreTensor(OpKernelContext* context,
 //   * "prefix" has 1 element, DT_STRING.
 //   * "tensor_names" and "shape_and_slices" shaped {N}, both DT_STRING.
 //   * "dtypes" has N elements, the datatypes of the to-restore tensors.
-Status RestoreTensorsV2(OpKernelContext* context, const Tensor& prefix,
-                        const Tensor& tensor_names,
-                        const Tensor& shape_and_slices,
-                        gtl::ArraySlice<DataType> dtypes);
+absl::Status RestoreTensorsV2(OpKernelContext* context, const Tensor& prefix,
+                              const Tensor& tensor_names,
+                              const Tensor& shape_and_slices,
+                              absl::Span<const DataType> dtypes);
 
 }  // namespace tensorflow
 
-#endif  // TENSORFLOW_KERNELS_SAVE_RESTORE_TENSOR_H_
+#endif  // TENSORFLOW_CORE_KERNELS_SAVE_RESTORE_TENSOR_H_

@@ -13,8 +13,11 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
+#include "absl/status/status.h"
+#include "absl/strings/str_cat.h"
 #include "tensorflow/compiler/tf2xla/xla_op_kernel.h"
 #include "tensorflow/compiler/tf2xla/xla_op_registry.h"
+#include "xla/hlo/builder/xla_builder.h"
 #include "tensorflow/core/framework/tensor_shape.h"
 
 namespace tensorflow {
@@ -29,29 +32,28 @@ class ClipByValueOp : public XlaOpKernel {
     const TensorShape min_shape = ctx->InputShape(1);
     const TensorShape max_shape = ctx->InputShape(2);
 
-    xla::XlaBuilder* builder = ctx->builder();
     auto input = ctx->Input(0);
     auto min = ctx->Input(1);
     auto max = ctx->Input(2);
 
-    auto shape_error = [&]() -> tensorflow::Status {
-      return errors::InvalidArgument(
-          "clip_value_min and clip_value_max must be either of "
-          "the same shape as input, or a scalar. ",
-          "Input shape: ", shape.DebugString(),
-          " clip_value_min shape: ", min_shape.DebugString(),
-          " clip_value_max shape: ", max_shape.DebugString());
+    auto shape_error = [&]() -> absl::Status {
+      return absl::InvalidArgumentError(
+          absl::StrCat("clip_value_min and clip_value_max must be either of "
+                       "the same shape as input, or a scalar. ",
+                       "Input shape: ", shape.DebugString(),
+                       " clip_value_min shape: ", min_shape.DebugString(),
+                       " clip_value_max shape: ", max_shape.DebugString()));
     };
 
     if (shape != min_shape) {
       OP_REQUIRES(ctx, TensorShapeUtils::IsScalar(min_shape), shape_error());
-      min = builder->Broadcast(min, shape.dim_sizes());
+      min = xla::Broadcast(min, shape.dim_sizes());
     }
     if (shape != max_shape) {
       OP_REQUIRES(ctx, TensorShapeUtils::IsScalar(max_shape), shape_error());
-      max = builder->Broadcast(max, shape.dim_sizes());
+      max = xla::Broadcast(max, shape.dim_sizes());
     }
-    ctx->SetOutput(0, builder->Clamp(min, input, max));
+    ctx->SetOutput(0, xla::Clamp(min, input, max));
   }
 };
 

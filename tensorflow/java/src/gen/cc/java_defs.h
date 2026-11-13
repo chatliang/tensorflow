@@ -16,10 +16,12 @@ limitations under the License.
 #ifndef TENSORFLOW_JAVA_SRC_GEN_CC_JAVA_DEFS_H_
 #define TENSORFLOW_JAVA_SRC_GEN_CC_JAVA_DEFS_H_
 
-#include <string>
 #include <list>
 #include <map>
+#include <string>
 #include <utility>
+
+#include "tensorflow/core/framework/types.h"
 
 namespace tensorflow {
 namespace java {
@@ -75,15 +77,18 @@ class Type {
     // Reflection API does
     return Type(Type::PRIMITIVE, "void");
   }
-  static Type Generic(const string& name) { return Type(Type::GENERIC, name); }
+  static Type Generic(const std::string& name) {
+    return Type(Type::GENERIC, name);
+  }
   static Type Wildcard() { return Type(Type::GENERIC, ""); }
-  static Type Class(const string& name, const string& package = "") {
+  static Type Class(const std::string& name, const std::string& package = "") {
     return Type(Type::CLASS, name, package);
   }
-  static Type Interface(const string& name, const string& package = "") {
+  static Type Interface(const std::string& name,
+                        const std::string& package = "") {
     return Type(Type::INTERFACE, name, package);
   }
-  static Type Enum(const string& name, const string& package = "") {
+  static Type Enum(const std::string& name, const std::string& package = "") {
     return Type(Type::ENUM, name, package);
   }
   static Type ClassOf(const Type& type) {
@@ -95,10 +100,38 @@ class Type {
   static Type IterableOf(const Type& type) {
     return Interface("Iterable").add_parameter(type);
   }
+  static Type ForDataType(DataType data_type) {
+    switch (data_type) {
+      case DataType::DT_BOOL:
+        return Class("Boolean");
+      case DataType::DT_STRING:
+        return Class("String");
+      case DataType::DT_FLOAT:
+        return Class("Float");
+      case DataType::DT_DOUBLE:
+        return Class("Double");
+      case DataType::DT_UINT8:
+        return Class("UInt8", "org.tensorflow.types");
+      case DataType::DT_INT32:
+        return Class("Integer");
+      case DataType::DT_INT64:
+        return Class("Long");
+      case DataType::DT_RESOURCE:
+        // TODO(karllessard) create a Resource utility class that could be
+        // used to store a resource and its type (passed in a second argument).
+        // For now, we need to force a wildcard and we will unfortunately lose
+        // track of the resource type.
+        // Falling through...
+      default:
+        // Any other datatypes does not have a equivalent in Java and must
+        // remain a wildcard (e.g. DT_COMPLEX64, DT_QINT8, ...)
+        return Wildcard();
+    }
+  }
   const Kind& kind() const { return kind_; }
-  const string& name() const { return name_; }
-  const string& package() const { return package_; }
-  const string canonical_name() const {
+  const std::string& name() const { return name_; }
+  const std::string& package() const { return package_; }
+  const std::string canonical_name() const {
     return package_.empty() ? name_ : package_ + "." + name_;
   }
   bool wildcard() const { return name_.empty(); }  // only wildcards has no name
@@ -123,13 +156,13 @@ class Type {
   }
 
  protected:
-  Type(Kind kind, const string& name, const string& package = "")
-    : kind_(kind), name_(name), package_(package) {}
+  Type(Kind kind, const std::string& name, const std::string& package = "")
+      : kind_(kind), name_(name), package_(package) {}
 
  private:
   Kind kind_;
-  string name_;
-  string package_;
+  std::string name_;
+  std::string package_;
   std::list<Type> parameters_;
   std::list<Annotation> annotations_;
   std::list<Type> supertypes_;
@@ -141,20 +174,21 @@ class Type {
 // giving optionally a set of attributes to initialize.
 class Annotation : public Type {
  public:
-  static Annotation Create(const string& type_name, const string& pkg = "") {
+  static Annotation Create(const std::string& type_name,
+                           const std::string& pkg = "") {
     return Annotation(type_name, pkg);
   }
-  const string& attributes() const { return attributes_; }
-  Annotation& attributes(const string& attributes) {
+  const std::string& attributes() const { return attributes_; }
+  Annotation& attributes(const std::string& attributes) {
     attributes_ = attributes;
     return *this;
   }
 
  private:
-  string attributes_;
+  std::string attributes_;
 
-  Annotation(const string& name, const string& package)
-    : Type(Kind::ANNOTATION, name, package) {}
+  Annotation(const std::string& name, const std::string& package)
+      : Type(Kind::ANNOTATION, name, package) {}
 };
 
 // A definition of a Java variable
@@ -163,23 +197,23 @@ class Annotation : public Type {
 // method argument, which can be documented.
 class Variable {
  public:
-  static Variable Create(const string& name, const Type& type) {
+  static Variable Create(const std::string& name, const Type& type) {
     return Variable(name, type, false);
   }
-  static Variable Varargs(const string& name, const Type& type) {
+  static Variable Varargs(const std::string& name, const Type& type) {
     return Variable(name, type, true);
   }
-  const string& name() const { return name_; }
+  const std::string& name() const { return name_; }
   const Type& type() const { return type_; }
   bool variadic() const { return variadic_; }
 
  private:
-  string name_;
+  std::string name_;
   Type type_;
   bool variadic_;
 
-  Variable(const string& name, const Type& type, bool variadic)
-    : name_(name), type_(type), variadic_(variadic) {}
+  Variable(const std::string& name, const Type& type, bool variadic)
+      : name_(name), type_(type), variadic_(variadic) {}
 };
 
 // A definition of a Java class method
@@ -188,14 +222,14 @@ class Variable {
 // type and arguments.
 class Method {
  public:
-  static Method Create(const string& name, const Type& return_type) {
+  static Method Create(const std::string& name, const Type& return_type) {
     return Method(name, return_type, false);
   }
   static Method ConstructorFor(const Type& clazz) {
     return Method(clazz.name(), clazz, true);
   }
   bool constructor() const { return constructor_; }
-  const string& name() const { return name_; }
+  const std::string& name() const { return name_; }
   const Type& return_type() const { return return_type_; }
   const std::list<Variable>& arguments() const { return arguments_; }
   Method& add_argument(const Variable& var) {
@@ -209,41 +243,45 @@ class Method {
   }
 
  private:
-  string name_;
+  std::string name_;
   Type return_type_;
   bool constructor_;
   std::list<Variable> arguments_;
   std::list<Annotation> annotations_;
 
-  Method(const string& name, const Type& return_type, bool constructor)
-    : name_(name), return_type_(return_type), constructor_(constructor) {}
+  Method(const std::string& name, const Type& return_type, bool constructor)
+      : name_(name), return_type_(return_type), constructor_(constructor) {}
 };
 
 // A definition of a documentation bloc for a Java element (JavaDoc)
 class Javadoc {
  public:
-  static Javadoc Create(const string& brief = "") { return Javadoc(brief); }
-  const string& brief() const { return brief_; }
-  const string& details() const { return details_; }
-  Javadoc& details(const string& details) {
+  static Javadoc Create(const std::string& brief = "") {
+    return Javadoc(brief);
+  }
+  const std::string& brief() const { return brief_; }
+  const std::string& details() const { return details_; }
+  Javadoc& details(const std::string& details) {
     details_ = details;
     return *this;
   }
-  const std::list<std::pair<string, string>>& tags() const { return tags_; }
-  Javadoc& add_tag(const string& tag, const string& text) {
+  const std::list<std::pair<std::string, std::string>>& tags() const {
+    return tags_;
+  }
+  Javadoc& add_tag(const std::string& tag, const std::string& text) {
     tags_.push_back(std::make_pair(tag, text));
     return *this;
   }
-  Javadoc& add_param_tag(const string& name, const string& text) {
+  Javadoc& add_param_tag(const std::string& name, const std::string& text) {
     return add_tag("param", name + " " + text);
   }
 
  private:
-  string brief_;
-  string details_;
-  std::list<std::pair<string, string>> tags_;
+  std::string brief_;
+  std::string details_;
+  std::list<std::pair<std::string, std::string>> tags_;
 
-  explicit Javadoc(const string& brief) : brief_(brief) {}
+  explicit Javadoc(const std::string& brief) : brief_(brief) {}
 };
 
 }  // namespace java

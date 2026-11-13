@@ -15,13 +15,23 @@ limitations under the License.
 
 #include "tensorflow/core/grappler/optimizers/data/graph_utils.h"
 
+#include <cstddef>
+#include <cstdint>
+#include <cstring>
+#include <functional>
+#include <map>
+#include <memory>
+#include <string>
+#include <unordered_map>
+#include <utility>
+#include <vector>
+
+#include "tensorflow/core/framework/dataset_metadata.pb.h"
 #include "tensorflow/core/framework/device_base.h"
-#include "tensorflow/core/grappler/clusters/virtual_cluster.h"
-#include "tensorflow/core/grappler/graph_view.h"
-#include "tensorflow/core/grappler/grappler_item.h"
-#include "tensorflow/core/grappler/grappler_item_builder.h"
-#include "tensorflow/core/grappler/optimizers/meta_optimizer.h"
-#include "tensorflow/core/util/ptr_util.h"
+#include "tensorflow/core/framework/op_def.pb.h"
+#include "tensorflow/core/lib/core/errors.h"
+#include "tensorflow/core/lib/gtl/map_util.h"
+#include "tensorflow/core/platform/strcat.h"
 
 namespace tensorflow {
 namespace grappler {
@@ -29,19 +39,28 @@ namespace graph_utils {
 namespace {
 
 constexpr char kConstOpName[] = "Const";
+constexpr char kRetValOp[] = "_Retval";
 
-int FindNodeWithPredicate(const std::function<bool(const NodeDef&)>& predicate,
-                          const GraphDef& graph) {
-  for (int i = 0; i < graph.node_size(); ++i) {
-    if (predicate(graph.node(i))) {
-      return i;
+constexpr char kOutputShapes[] = "output_shapes";
+constexpr char kOutputTypes[] = "output_types";
+constexpr char kToutputTypes[] = "Toutput_types";
+
+template <typename Predicate, typename Collection>
+std::vector<int> GetElementIndicesWithPredicate(const Predicate& predicate,
+                                                const Collection& collection) {
+  std::vector<int> indices = {};
+  unsigned idx = 0;
+  for (auto&& element : collection) {
+    if (predicate(element)) {
+      indices.push_back(idx);
     }
+    idx++;
   }
-  return -1;
+  return indices;
 }
 
 std::vector<int> CreateNameIndex(const GraphDef& graph) {
-  std::map<string, int> names;
+  std::map<std::string, int> names;
   for (int i = 0; i < graph.node_size(); ++i) {
     names[graph.node(i).name()] = i;
   }
@@ -54,7 +73,7 @@ std::vector<int> CreateNameIndex(const GraphDef& graph) {
 }
 
 std::vector<int> CreateInputIndex(const NodeDef& node) {
-  std::map<string, int> inputs;
+  std::map<std::string, int> inputs;
   for (int i = 0; i < node.input_size(); ++i) {
     inputs[node.input(i)] = i;
   }
@@ -66,89 +85,135 @@ std::vector<int> CreateInputIndex(const NodeDef& node) {
   return index;
 }
 
-Status AddScalarConstNodeHelper(
+NodeDef* AddScalarConstNodeHelper(
     DataType dtype, const std::function<void(TensorProto*)>& add_value,
-    GraphDef* graph, NodeDef** result) {
-  NodeDef* node = graph->add_node();
-  node->set_op(kConstOpName);
-  SetUniqueName(kConstOpName, graph, node);
-  (*node->mutable_attr())["dtype"].set_type(dtype);
+    MutableGraphView* graph) {
+  NodeDef node;
+  node.set_op(kConstOpName);
+  SetUniqueGraphNodeName(kConstOpName, graph->graph(), &node);
+
+  (*node.mutable_attr())["dtype"].set_type(dtype);
   std::unique_ptr<tensorflow::TensorProto> tensor =
-      tensorflow::MakeUnique<tensorflow::TensorProto>();
+      std::make_unique<tensorflow::TensorProto>();
   std::unique_ptr<tensorflow::TensorShapeProto> tensor_shape =
-      tensorflow::MakeUnique<tensorflow::TensorShapeProto>();
+      std::make_unique<tensorflow::TensorShapeProto>();
   tensor->set_allocated_tensor_shape(tensor_shape.release());
   tensor->set_dtype(dtype);
   add_value(tensor.get());
-  (*node->mutable_attr())["value"].set_allocated_tensor(tensor.release());
-  *result = node;
-  return Status::OK();
+  (*node.mutable_attr())["value"].set_allocated_tensor(tensor.release());
+
+  return graph->AddNode(std::move(node));
 }
 
 }  // namespace
 
-Status AddNode(const string& name, const string& op,
-               const std::vector<string>& inputs,
-               const std::vector<std::pair<string, AttrValue>>& attributes,
-               GraphDef* graph, NodeDef** result) {
-  NodeDef* node = graph->add_node();
+NodeDef* AddScalarPlaceholder(DataType dtype, MutableGraphView* graph) {
+  NodeDef node;
+  node.set_op("Placeholder");
+  SetUniqueGraphNodeName(node.op(), graph->graph(), &node);
+  (*node.mutable_attr())["dtype"].set_type(dtype);
+  TensorShapeProto* shape = (*node.mutable_attr())["shape"].mutable_shape();
+  shape->set_unknown_rank(false);
+  return graph->AddNode(std::move(node));
+}
+
+NodeDef* AddNode(
+    absl::string_view name, absl::string_view op,
+    const std::vector<std::string>& inputs,
+    const std::vector<std::pair<std::string, AttrValue>>& attributes,
+    MutableGraphView* graph) {
+  NodeDef node;
   if (!name.empty()) {
-    node->set_name(name);
+    node.set_name(name);
   } else {
-    SetUniqueName(op, graph, node);
+    SetUniqueGraphNodeName(op, graph->graph(), &node);
   }
-  node->set_op(op);
-  for (const string& input : inputs) {
-    node->add_input(input);
+  node.set_op(op);
+  for (const std::string& input : inputs) {
+    node.add_input(input);
   }
-  for (auto attr : attributes) {
-    (*node->mutable_attr())[attr.first] = attr.second;
+  for (const auto& attr : attributes) {
+    (*node.mutable_attr())[attr.first] = attr.second;
   }
-  *result = node;
-  return Status::OK();
+  return graph->AddNode(std::move(node));
 }
 
 template <>
-Status AddScalarConstNode(bool v, GraphDef* graph, NodeDef** result) {
+NodeDef* AddScalarConstNode(bool v, MutableGraphView* graph) {
   return AddScalarConstNodeHelper(
-      DT_BOOL, [v](TensorProto* proto) { proto->add_bool_val(v); }, graph,
-      result);
+      DT_BOOL, [v](TensorProto* proto) { proto->add_bool_val(v); }, graph);
 }
 
 template <>
-Status AddScalarConstNode(double v, GraphDef* graph, NodeDef** result) {
+NodeDef* AddScalarConstNode(double v, MutableGraphView* graph) {
   return AddScalarConstNodeHelper(
-      DT_DOUBLE, [v](TensorProto* proto) { proto->add_double_val(v); }, graph,
-      result);
+      DT_DOUBLE, [v](TensorProto* proto) { proto->add_double_val(v); }, graph);
 }
 
 template <>
-Status AddScalarConstNode(float v, GraphDef* graph, NodeDef** result) {
+NodeDef* AddScalarConstNode(float v, MutableGraphView* graph) {
   return AddScalarConstNodeHelper(
-      DT_FLOAT, [v](TensorProto* proto) { proto->add_float_val(v); }, graph,
-      result);
+      DT_FLOAT, [v](TensorProto* proto) { proto->add_float_val(v); }, graph);
 }
 
 template <>
-Status AddScalarConstNode(int v, GraphDef* graph, NodeDef** result) {
+NodeDef* AddScalarConstNode(int v, MutableGraphView* graph) {
   return AddScalarConstNodeHelper(
-      DT_INT32, [v](TensorProto* proto) { proto->add_int_val(v); }, graph,
-      result);
+      DT_INT32, [v](TensorProto* proto) { proto->add_int_val(v); }, graph);
 }
 
 template <>
-Status AddScalarConstNode(int64 v, GraphDef* graph, NodeDef** result) {
+NodeDef* AddScalarConstNode(int64_t v, MutableGraphView* graph) {
   return AddScalarConstNodeHelper(
-      DT_INT64, [v](TensorProto* proto) { proto->add_int64_val(v); }, graph,
-      result);
+      DT_INT64, [v](TensorProto* proto) { proto->add_int64_val(v); }, graph);
 }
 
 template <>
-Status AddScalarConstNode(StringPiece v, GraphDef* graph, NodeDef** result) {
+NodeDef* AddScalarConstNode(absl::string_view v, MutableGraphView* graph) {
   return AddScalarConstNodeHelper(
       DT_STRING,
       [v](TensorProto* proto) { proto->add_string_val(v.data(), v.size()); },
-      graph, result);
+      graph);
+}
+
+absl::Status GetScalarConstNodeValueHelper(
+    const NodeDef& node, DataType dtype,
+    const std::function<void(const Tensor&)>& get_value) {
+  if (node.op() != kConstOpName)
+    return absl::InvalidArgumentError(absl::StrCat(
+        "Node ", node.name(), " is not a Const node. Op: ", node.op()));
+
+  Tensor tensor;
+  TF_RETURN_IF_ERROR(GetNodeAttr(node, "value", &tensor));
+  if (!TensorShapeUtils::IsScalar(tensor.shape())) {
+    return errors::InvalidArgument(
+        "Node ", node.name(),
+        " should be a scalar but has shape: ", tensor.shape());
+  }
+
+  if (tensor.dtype() != dtype) {
+    return absl::InvalidArgumentError(absl::StrCat(
+        "Node ", node.name(), " should have type ", DataTypeString(dtype),
+        " but has type: ", DataTypeString(tensor.dtype())));
+  }
+
+  get_value(tensor);
+
+  return absl::OkStatus();
+}
+
+template <>
+absl::Status GetScalarConstNodeValue(const NodeDef& node, int64_t* value) {
+  return GetScalarConstNodeValueHelper(
+      node, DT_INT64,
+      [value](const Tensor& tensor) { *value = tensor.scalar<int64_t>()(); });
+}
+
+template <>
+absl::Status GetScalarConstNodeValue(const NodeDef& node, bool* value) {
+  return GetScalarConstNodeValueHelper(
+      node, DT_BOOL,
+      [value](const Tensor& tensor) { *value = tensor.scalar<bool>()(); });
 }
 
 bool Compare(const GraphDef& g1, const GraphDef& g2) {
@@ -181,46 +246,243 @@ bool Compare(const GraphDef& g1, const GraphDef& g2) {
   return true;
 }
 
-bool ContainsNodeWithName(const string& name, const GraphDef& graph) {
-  return FindNodeWithName(name, graph) != -1;
+bool ContainsGraphFunctionWithName(absl::string_view name,
+                                   const FunctionDefLibrary& library) {
+  return FindGraphFunctionWithName(name, library) != -1;
 }
 
-bool ContainsNodeWithOp(const string& op, const GraphDef& graph) {
-  return FindNodeWithOp(op, graph) != -1;
+bool ContainsGraphNodeWithName(absl::string_view name, const GraphDef& graph) {
+  return FindGraphNodeWithName(name, graph) != -1;
 }
 
-Status DeleteNodes(const std::set<string>& nodes_to_delete, GraphDef* graph) {
-  int last = graph->node_size() - 1;
-  for (int i = graph->node_size() - 1; i >= 0; --i) {
-    const NodeDef& node = graph->node(i);
-    if (nodes_to_delete.find(node.name()) != nodes_to_delete.end()) {
-      graph->mutable_node()->SwapElements(i, last);
-      last--;
+bool ContainsNodeWithOp(absl::string_view op, const GraphDef& graph) {
+  return FindGraphNodeWithOp(op, graph) != -1;
+}
+
+int FindGraphFunctionWithName(absl::string_view name,
+                              const FunctionDefLibrary& library) {
+  return GetFirstElementIndexWithPredicate(
+      [&name](const FunctionDef& function) {
+        return function.signature().name() == name;
+      },
+      library.function());
+}
+
+int FindGraphNodeWithName(absl::string_view name, const GraphDef& graph) {
+  return GetFirstElementIndexWithPredicate(
+      [&name](const NodeDef& node) { return node.name() == name; },
+      graph.node());
+}
+
+int FindGraphNodeWithOp(absl::string_view op, const GraphDef& graph) {
+  return GetFirstElementIndexWithPredicate(
+      [&op](const NodeDef& node) { return node.op() == op; }, graph.node());
+}
+
+std::vector<int> FindAllGraphNodesWithOp(const std::string& op,
+                                         const GraphDef& graph) {
+  return GetElementIndicesWithPredicate(
+      [&op](const NodeDef& node) { return node.op() == op; }, graph.node());
+}
+
+NodeDef* GetInputNode(const NodeDef& node, const MutableGraphView& graph) {
+  if (node.input_size() == 0) return nullptr;
+  MutableGraphView::InputPort input_port = graph.GetInputPort(node.name(), 0);
+  return graph.GetRegularFanin(input_port).node;
+}
+
+NodeDef* GetInputNode(const NodeDef& node, const MutableGraphView& graph,
+                      int64_t i) {
+  if (node.input_size() <= i) return nullptr;
+  MutableGraphView::InputPort input_port = graph.GetInputPort(node.name(), i);
+  return graph.GetRegularFanin(input_port).node;
+}
+
+absl::Status GetDatasetOutputTypesAttr(const NodeDef& node,
+                                       DataTypeVector* output_types) {
+  // We don't name the output_types attr consistently, so should check for both.
+  for (const std::string& attr_name : {"output_types", "Toutput_types"}) {
+    if (node.attr().contains(attr_name)) {
+      return GetNodeAttr(node, attr_name, output_types);
     }
   }
-  graph->mutable_node()->DeleteSubrange(last + 1,
-                                        graph->node_size() - last - 1);
-  return Status::OK();
+  return absl::InvalidArgumentError(
+      absl::StrCat("Could not find output_types attr for node: ", node.name(),
+                   " with op: ", node.op()));
 }
 
-int FindNodeWithName(const string& name, const GraphDef& graph) {
-  return FindNodeWithPredicate(
-      [name](const NodeDef& node) { return node.name() == name; }, graph);
-}
-
-int FindNodeWithOp(const string& op, const GraphDef& graph) {
-  return FindNodeWithPredicate(
-      [op](const NodeDef& node) { return node.op() == op; }, graph);
-}
-
-void SetUniqueName(const string& op, GraphDef* graph, NodeDef* node) {
+void SetUniqueGraphNodeName(absl::string_view prefix, GraphDef* graph,
+                            NodeDef* node) {
+  std::string name = std::string(prefix);
   int id = graph->node_size();
-  while (ContainsNodeWithName(strings::StrCat(op, "/_", id), *graph)) {
+  while (ContainsGraphNodeWithName(name, *graph)) {
+    if (name.rfind("_generated") != std::string::npos &&
+        (name.rfind("_generated") == (name.size() - strlen("_generated")))) {
+      name.insert(name.rfind("_generated"), absl::StrCat("/_", id));
+    } else {
+      name = absl::StrCat(prefix, "/_", id);
+    }
     ++id;
   }
-  node->set_name(strings::StrCat(op, "/_", id));
+  node->set_name(std::move(name));
 }
 
-}  // end namespace graph_utils
-}  // end namespace grappler
-}  // end namespace tensorflow
+void SetUniqueGraphFunctionName(absl::string_view prefix,
+                                const FunctionDefLibrary* library,
+                                FunctionDef* function) {
+  std::string name = std::string(prefix);
+  int id = library->function_size();
+  while (ContainsGraphFunctionWithName(name, *library)) {
+    name = absl::StrCat(prefix, "/_", id);
+    ++id;
+  }
+  function->mutable_signature()->set_name(std::move(name));
+}
+
+void CopyAttribute(const std::string& attribute_name, const NodeDef& from,
+                   NodeDef* to_node) {
+  (*to_node->mutable_attr())[attribute_name] = from.attr().at(attribute_name);
+}
+
+void ConcatAttributeList(const std::string& attribute_name,
+                         const NodeDef& first, const NodeDef& second,
+                         NodeDef* to_node) {
+  CopyAttribute(attribute_name, first, to_node);
+  (*to_node->mutable_attr())
+      .at(attribute_name)
+      .mutable_list()
+      ->MergeFrom(second.attr().at(attribute_name).list());
+}
+
+absl::Status EnsureNodeNamesUnique(Graph* g) {
+  // Modeled after Scope::Impl::GetUniqueName
+  std::unordered_map<std::string, int> name_map;
+
+  for (auto node : g->op_nodes()) {
+    const std::string& prefix = node->name();
+    if (auto entry = gtl::FindOrNull(name_map, prefix)) {
+      std::string unique_name;
+      do {
+        unique_name = absl::StrCat(prefix, "_", ++*entry);
+      } while (name_map.find(unique_name) != name_map.end());
+      name_map.insert({unique_name, 0});
+      node->set_name(std::move(unique_name));
+    } else {
+      name_map.insert({node->name(), 0});
+    }
+  }
+
+  return absl::OkStatus();
+}
+
+absl::Status GetFetchNode(const MutableGraphView& graph,
+                          const GrapplerItem& item, NodeDef** fetch_node) {
+  if (item.fetch.size() != 1) {
+    return absl::InvalidArgumentError(
+        absl::StrCat("Expected only one fetch node but there were ",
+                     item.fetch.size(), ": ", absl::StrJoin(item.fetch, ", ")));
+  }
+
+  *fetch_node = graph.GetNode(item.fetch.at(0));
+
+  return absl::OkStatus();
+}
+
+bool IsItemDerivedFromFunctionDef(const GrapplerItem& item,
+                                  const MutableGraphView& graph_view) {
+  for (const auto& fetch_name : item.fetch) {
+    auto fetch = graph_view.GetNode(fetch_name);
+    if (fetch != nullptr && fetch->op() != kRetValOp) {
+      // We found a fetch node which is not a `Retval` op.
+      return false;
+    }
+  }
+  // All fetch nodes are `Retval` ops (or we don't have any fetch nodes).
+  return true;
+}
+
+void MaybeSetFusedMetadata(const NodeDef& node1, const NodeDef& node2,
+                           NodeDef* fused_node) {
+  data::Metadata metadata1;
+  if (node1.attr().contains("metadata")) {
+    metadata1.ParseFromString(node1.attr().at("metadata").s());
+  }
+  data::Metadata metadata2;
+  if (node2.attr().contains("metadata")) {
+    metadata2.ParseFromString(node2.attr().at("metadata").s());
+  }
+  data::Metadata fused_metadata;
+  auto normalize_name = [](const std::string& name) {
+    return name.empty() ? "?" : name;
+  };
+  *fused_metadata.mutable_name() =
+      strings::StrCat("fused(", normalize_name(metadata1.name()), ",",
+                      normalize_name(metadata2.name()), ")");
+  fused_metadata.SerializeToString(
+      (*fused_node->mutable_attr())["metadata"].mutable_s());
+}
+
+bool CopyShapesAndTypesAttrs(const NodeDef& from, NodeDef* to_node) {
+  auto* attr = gtl::FindOrNull(from.attr(), kOutputTypes);
+  attr = (attr == nullptr ? gtl::FindOrNull(from.attr(), kToutputTypes) : attr);
+
+  if (attr == nullptr) return false;
+  (*to_node->mutable_attr())[kOutputTypes] = *attr;
+
+  attr = gtl::FindOrNull(from.attr(), kOutputShapes);
+  if (attr == nullptr) return false;
+  (*to_node->mutable_attr())[kOutputShapes] = *attr;
+  return true;
+}
+
+namespace {
+const auto* kSloppyAttrOps = new absl::flat_hash_set<std::string>{
+    "ParallelInterleaveDatasetV2",
+    "ParallelMapDataset",
+    "ParseExampleDataset",
+};
+
+const auto* kReplicateOnSplitAttrOps = new absl::flat_hash_set<std::string>{
+    "TensorSliceDataset",
+    "RangeDataset",
+};
+
+const auto* kDeterministicAttrOps = new absl::flat_hash_set<std::string>{
+    "LegacyParallelInterleaveDatasetV2",
+    "ParallelInterleaveDatasetV3",
+    "ParallelInterleaveDatasetV4",
+    "ParallelMapDatasetV2",
+    "ParallelBatchDataset",
+};
+}  // anonymous namespace
+
+bool HasSloppyAttr(const std::string& op) {
+  return kSloppyAttrOps->contains(op);
+}
+
+bool HasReplicateOnSplitAttr(const std::string& op) {
+  return kReplicateOnSplitAttrOps->contains(op);
+}
+
+bool HasDeterministicAttr(const std::string& op) {
+  return kDeterministicAttrOps->contains(op);
+}
+
+absl::Status SetMetadataName(const std::string& name, NodeDef* node) {
+  data::Metadata metadata;
+  if (node->attr().contains("metadata")) {
+    metadata.ParseFromString(node->attr().at("metadata").s());
+  }
+  if (!metadata.name().empty()) {
+    return absl::InvalidArgumentError(
+        absl::StrCat("Node ", node->name(), " already has a metadata name \"",
+                     metadata.name(), "\"."));
+  }
+  *metadata.mutable_name() = name;
+  metadata.SerializeToString((*node->mutable_attr())["metadata"].mutable_s());
+  return absl::OkStatus();
+}
+
+}  // namespace graph_utils
+}  // namespace grappler
+}  // namespace tensorflow

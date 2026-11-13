@@ -14,10 +14,6 @@
 # ==============================================================================
 """Tests for Special Math Ops."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import collections
 import importlib
 
@@ -61,7 +57,7 @@ def _make_grid(dtype, grid_spec):
   num_points = np.prod(grid_spec.shape)
   grid = np.linspace(grid_spec.min, grid_spec.max, num=num_points).astype(dtype)
   grid_spacing = (grid_spec.max - grid_spec.min) / num_points
-  grid += 0.1 * grid_spacing * rng.randn(*grid.shape)
+  grid += 0.1 * grid_spacing * rng.randn(*grid.shape)  # pylint: disable=not-an-iterable
   # More useful if it's sorted (e.g. for testing monotonicity, or debugging).
   grid = np.sort(grid)
   return np.reshape(grid, grid_spec.shape)
@@ -86,28 +82,28 @@ class NdtriTest(test.TestCase):
 
   def assertAllFinite(self, x):
     is_finite = np.isfinite(x)
-    all_true = np.ones_like(is_finite, dtype=np.bool)
+    all_true = np.ones_like(is_finite, dtype=np.bool_)
     self.assertAllEqual(all_true, is_finite)
 
-  @test_util.run_in_graph_and_eager_modes()
+  @test_util.run_in_graph_and_eager_modes
   def testNdtri(self):
     """Verifies that ndtri computation is correct."""
-    with self.test_session():
-      if not special:
-        return
+    if not special:
+      return
 
-      p = np.linspace(0., 1.0, 50).astype(np.float64)
-      # Quantile performs piecewise rational approximation so adding some
-      # special input values to make sure we hit all the pieces.
-      p = np.hstack((p, np.exp(-32), 1. - np.exp(-32),
-                     np.exp(-2), 1. - np.exp(-2)))
-      expected_x = special.ndtri(p)
-      x = special_math.ndtri(p)
-      self.assertAllClose(expected_x, self.evaluate(x), atol=0.)
+    p = np.linspace(0., 1.0, 50).astype(np.float64)
+    # Quantile performs piecewise rational approximation so adding some
+    # special input values to make sure we hit all the pieces.
+    p = np.hstack((p, np.exp(-32), 1. - np.exp(-32), np.exp(-2),
+                   1. - np.exp(-2)))
+    expected_x = special.ndtri(p)
+    x = special_math.ndtri(p)
+    self.assertAllClose(expected_x, self.evaluate(x), atol=0.)
 
+  @test_util.run_deprecated_v1
   def testNdtriDynamicShape(self):
     """Verifies that ndtri computation is correct."""
-    with self.test_session() as sess:
+    with self.cached_session() as sess:
       if not special:
         return
 
@@ -132,17 +128,17 @@ class NdtriTest(test.TestCase):
             1. - np.exp(-32.),
             1.,
         ]).astype(dtype))
-    # Not having the lambda sanitzer means we'd get an `IndexError` whenever
+    # Not having the lambda sanitizer means we'd get an `IndexError` whenever
     # the user supplied function has default args.
     _, grads = _value_and_gradient(
         lambda x: special_math.ndtri(x), p)  # pylint: disable=unnecessary-lambda
     self.assertAllFinite(self.evaluate(grads[0]))
 
-  @test_util.run_in_graph_and_eager_modes()
+  @test_util.run_in_graph_and_eager_modes
   def testNdtriFiniteGradientFloat32(self):
     self._baseNdtriFiniteGradientTest(np.float32)
 
-  @test_util.run_in_graph_and_eager_modes()
+  @test_util.run_in_graph_and_eager_modes
   def testNdtriFiniteGradientFloat64(self):
     self._baseNdtriFiniteGradientTest(np.float64)
 
@@ -214,9 +210,11 @@ class NdtrTest(test.TestCase):
         rtol=error_spec.rtol,
         atol=error_spec.atol)
 
+  @test_util.run_deprecated_v1
   def test_float32(self):
     self._test_grid(np.float32, self._grid32, self._error32)
 
+  @test_util.run_deprecated_v1
   def test_float64(self):
     self._test_grid(np.float64, self._grid64, self._error64)
 
@@ -265,16 +263,16 @@ class NdtrGradientTest(test.TestCase):
   _error64 = ErrorSpec(rtol=1e-7, atol=0)
 
   def assert_all_true(self, v):
-    self.assertAllEqual(np.ones_like(v, dtype=np.bool), v)
+    self.assertAllEqual(np.ones_like(v, dtype=np.bool_), v)
 
   def assert_all_false(self, v):
-    self.assertAllEqual(np.zeros_like(v, dtype=np.bool), v)
+    self.assertAllEqual(np.zeros_like(v, dtype=np.bool_), v)
 
   def _test_grad_finite(self, dtype):
     x = constant_op.constant([-100., 0., 100.], dtype=dtype)
     output = (sm.log_ndtr(x) if self._use_log else sm.ndtr(x))
     fn = sm.log_ndtr if self._use_log else sm.ndtr
-    # Not having the lambda sanitzer means we'd get an `IndexError` whenever
+    # Not having the lambda sanitizer means we'd get an `IndexError` whenever
     # the user supplied function has default args.
     output, grad_output = _value_and_gradient(
         lambda x_: fn(x_), x)  # pylint: disable=unnecessary-lambda
@@ -286,15 +284,16 @@ class NdtrGradientTest(test.TestCase):
   def _test_grad_accuracy(self, dtype, grid_spec, error_spec):
     raw_grid = _make_grid(dtype, grid_spec)
     grid = ops.convert_to_tensor(raw_grid)
-    with self.test_session():
+    with self.cached_session():
       fn = sm.log_ndtr if self._use_log else sm.ndtr
 
       # If there are N points in the grid,
       # grad_eval.shape = (N, N), with grad_eval[i, j] the partial derivative of
       # the ith output point w.r.t. the jth grid point.  We only expect the
       # diagonal to be nonzero.
-      # TODO(b/31131137): Replace tf.test.compute_gradient with our own custom
-      # gradient evaluation to ensure we correctly handle small function delta.
+      # TODO(b/31131137): Replace tf.compat.v1.test.compute_gradient with our
+      # own custom gradient evaluation to ensure we correctly handle small
+      # function delta.
       grad_eval, _ = gradient_checker.compute_gradient(grid, grid_spec.shape,
                                                        fn(grid),
                                                        grid_spec.shape)
@@ -339,10 +338,12 @@ class NdtrGradientTest(test.TestCase):
           rtol=error_spec.rtol,
           atol=error_spec.atol)
 
+  @test_util.run_deprecated_v1
   def test_float32(self):
     self._test_grad_accuracy(np.float32, self._grid, self._error32)
     self._test_grad_finite(np.float32)
 
+  @test_util.run_deprecated_v1
   def test_float64(self):
     self._test_grad_accuracy(np.float64, self._grid, self._error64)
     self._test_grad_finite(np.float64)
@@ -355,7 +356,7 @@ class LogNdtrGradientTest(NdtrGradientTest):
 class ErfInvTest(test.TestCase):
 
   def testErfInvValues(self):
-    with self.test_session():
+    with self.cached_session():
       if not special:
         return
 
@@ -363,10 +364,10 @@ class ErfInvTest(test.TestCase):
 
       expected_x = special.erfinv(x)
       x = special_math.erfinv(x)
-      self.assertAllClose(expected_x, x.eval(), atol=0.)
+      self.assertAllClose(expected_x, self.evaluate(x), atol=0.)
 
   def testErfInvIntegerInput(self):
-    with self.test_session():
+    with self.cached_session():
 
       with self.assertRaises(TypeError):
         x = np.array([1, 2, 3]).astype(np.int32)
@@ -394,10 +395,10 @@ class LogCDFLaplaceTest(test.TestCase):
   CUTOFF_FLOAT32_UPPER = np.log(1. / (2. * np.finfo(np.float32).eps)) - 1.
 
   def assertAllTrue(self, x):
-    self.assertAllEqual(np.ones_like(x, dtype=np.bool), x)
+    self.assertAllEqual(np.ones_like(x, dtype=np.bool_), x)
 
   def _test_grid_log(self, dtype, scipy_dtype, grid_spec, error_spec):
-    with self.test_session():
+    with self.cached_session():
       grid = _make_grid(dtype, grid_spec)
       actual = sm.log_cdf_laplace(grid).eval()
 
@@ -419,6 +420,7 @@ class LogCDFLaplaceTest(test.TestCase):
           rtol=error_spec.rtol,
           atol=error_spec.atol)
 
+  @test_util.run_deprecated_v1
   def test_float32_lower_and_mid_segment_scipy_float32_ok(self):
     # Choose values mild enough that we can use scipy in float32, which will
     # allow for a high accuracy match to scipy (since we both use float32).
@@ -428,6 +430,7 @@ class LogCDFLaplaceTest(test.TestCase):
         GridSpec(min=-10, max=self.CUTOFF_FLOAT32_UPPER - 5, shape=[100]),
         ErrorSpec(rtol=5e-4, atol=0))
 
+  @test_util.run_deprecated_v1
   def test_float32_all_segments_with_scipy_float64_ok(self):
     # Choose values outside the range where scipy float32 works.
     # Let scipy use float64.  This means we
@@ -438,8 +441,9 @@ class LogCDFLaplaceTest(test.TestCase):
         GridSpec(min=-50, max=self.CUTOFF_FLOAT32_UPPER + 5, shape=[100]),
         ErrorSpec(rtol=0.05, atol=0))
 
+  @test_util.run_deprecated_v1
   def test_float32_extreme_values_result_and_gradient_finite_and_nonzero(self):
-    with self.test_session() as sess:
+    with self.cached_session() as sess:
       # On the lower branch, log_cdf_laplace(x) = x, so we know this will be
       # fine, but test to -200 anyways.
       grid = _make_grid(
@@ -449,7 +453,7 @@ class LogCDFLaplaceTest(test.TestCase):
       actual = sm.log_cdf_laplace(grid)
       grad = gradients_impl.gradients(actual, grid)[0]
 
-      actual_, grad_ = sess.run([actual, grad])
+      actual_, grad_ = self.evaluate([actual, grad])
 
       # isfinite checks for NaN and Inf.
       self.assertAllTrue(np.isfinite(actual_))
@@ -457,8 +461,9 @@ class LogCDFLaplaceTest(test.TestCase):
       self.assertFalse(np.any(actual_ == 0))
       self.assertFalse(np.any(grad_ == 0))
 
+  @test_util.run_deprecated_v1
   def test_float64_extreme_values_result_and_gradient_finite_and_nonzero(self):
-    with self.test_session() as sess:
+    with self.cached_session() as sess:
       # On the lower branch, log_cdf_laplace(x) = x, so we know this will be
       # fine, but test to -200 anyways.
       grid = _make_grid(
@@ -468,7 +473,7 @@ class LogCDFLaplaceTest(test.TestCase):
       actual = sm.log_cdf_laplace(grid)
       grad = gradients_impl.gradients(actual, grid)[0]
 
-      actual_, grad_ = sess.run([actual, grad])
+      actual_, grad_ = self.evaluate([actual, grad])
 
       # isfinite checks for NaN and Inf.
       self.assertAllTrue(np.isfinite(actual_))

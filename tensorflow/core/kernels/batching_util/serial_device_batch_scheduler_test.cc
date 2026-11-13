@@ -15,8 +15,8 @@ limitations under the License.
 
 #include "tensorflow/core/kernels/batching_util/serial_device_batch_scheduler.h"
 
+#include "absl/synchronization/notification.h"
 #include "tensorflow/core/kernels/batching_util/fake_clock_env.h"
-#include "tensorflow/core/lib/core/notification.h"
 #include "tensorflow/core/lib/core/status_test_util.h"
 #include "tensorflow/core/platform/macros.h"
 #include "tensorflow/core/platform/test.h"
@@ -36,14 +36,16 @@ class FakeTask : public BatchTask {
  private:
   const size_t size_;
 
-  TF_DISALLOW_COPY_AND_ASSIGN(FakeTask);
+  FakeTask(const FakeTask&) = delete;
+  void operator=(const FakeTask&) = delete;
 };
 
 // Creates a FakeTask of size 'task_size', and calls 'scheduler->Schedule()' on
 // that task. Returns the resulting status.
-Status ScheduleTask(size_t task_size, BatchScheduler<FakeTask>* scheduler) {
+absl::Status ScheduleTask(size_t task_size,
+                          BatchScheduler<FakeTask>* scheduler) {
   std::unique_ptr<FakeTask> task(new FakeTask(task_size));
-  Status status = scheduler->Schedule(&task);
+  absl::Status status = scheduler->Schedule(&task);
   // Schedule() should have consumed 'task' iff it returned Status::OK.
   CHECK_EQ(status.ok(), task == nullptr);
   return status;
@@ -53,7 +55,8 @@ Status ScheduleTask(size_t task_size, BatchScheduler<FakeTask>* scheduler) {
 // 'env' in a loop until 'stop' is notified. Useful for allowing objects that
 // use the clock to be destroyed.
 std::unique_ptr<Thread> CreateFakeClockAdvancerThread(
-    test_util::FakeClockEnv* env, Notification* start, Notification* stop) {
+    test_util::FakeClockEnv* env, absl::Notification* start,
+    absl::Notification* stop) {
   return std::unique_ptr<Thread>(Env::Default()->StartThread(
       {}, "FakeClockAdvancerThread", [env, start, stop] {
         start->WaitForNotification();
@@ -97,7 +100,7 @@ TEST(SerialDeviceBatchSchedulerTest, InFlightBatchesLimit) {
   options.get_pending_on_serial_device = []() { return 0; };
   mutex mu;
   int processed_batches = 0;
-  Notification finish_processing;
+  absl::Notification finish_processing;
   auto queue_callback = [&mu, &processed_batches, &finish_processing](
                             std::unique_ptr<Batch<FakeTask>> batch) {
     ASSERT_TRUE(batch->IsClosed());
@@ -145,10 +148,8 @@ TEST(SerialDeviceBatchSchedulerTest, PendingOnSerialDevice) {
   std::shared_ptr<SerialDeviceBatchScheduler<FakeTask>> scheduler;
   TF_ASSERT_OK(
       SerialDeviceBatchScheduler<FakeTask>::Create(options, &scheduler));
-  // Make sure batch processing thread has gone to sleep.
-  Env::Default()->SleepForMicroseconds(1000);
   int processed_batches = 0;
-  Notification start_processing;
+  absl::Notification start_processing;
   auto queue_callback = [&mu, &processed_batches, &start_processing, &pending,
                          &scheduler](std::unique_ptr<Batch<FakeTask>> batch) {
     // Be careful with mutex mu to avoid potential deadlock with mutex mu_
@@ -163,26 +164,18 @@ TEST(SerialDeviceBatchSchedulerTest, PendingOnSerialDevice) {
         start_processing.WaitForNotification();
         {
           mutex_lock l(mu);
-          pending = 2;
-        }
-        break;
-      case 2:
-        // No batches initially --> low traffic --> no adjustment.
-        CHECK_EQ(scheduler->in_flight_batches_limit(), 1);
-        {
-          mutex_lock l(mu);
           pending = 3;
         }
         break;
-      case 3:
-        // Pending at target --> no adjustment.
+      case 2:
+        // Either low traffic or pending at target --> no adjustment.
         CHECK_EQ(scheduler->in_flight_batches_limit(), 1);
         {
           mutex_lock l(mu);
           pending = 1;
         }
         break;
-      case 4:
+      case 3:
         // Small pending --> 2 additional threads added.
         CHECK_EQ(scheduler->in_flight_batches_limit(), 3);
         {
@@ -196,8 +189,8 @@ TEST(SerialDeviceBatchSchedulerTest, PendingOnSerialDevice) {
   };
   std::unique_ptr<BatchScheduler<FakeTask>> queue;
   TF_ASSERT_OK(scheduler->AddQueue({}, queue_callback, &queue));
-  // Create 4 batches.
-  for (int i = 0; i < 4; i++) {
+  // Create 3 batches.
+  for (int i = 0; i < 3; i++) {
     TF_ASSERT_OK(ScheduleTask(800, queue.get()));
   }
   start_processing.Notify();
@@ -205,7 +198,7 @@ TEST(SerialDeviceBatchSchedulerTest, PendingOnSerialDevice) {
 
 TEST(SerialDeviceBatchSchedulerTest, FullBatchSchedulingBoostMicros) {
   test_util::FakeClockEnv env(Env::Default());
-  Notification start_teardown, stop_teardown;
+  absl::Notification start_teardown, stop_teardown;
   std::unique_ptr<Thread> teardown_thread =
       CreateFakeClockAdvancerThread(&env, &start_teardown, &stop_teardown);
   {
@@ -274,7 +267,7 @@ TEST(SerialDeviceBatchSchedulerTest, DeleteQueue) {
   options.get_pending_on_serial_device = []() { return 0; };
   mutex mu;
   int processed_batches = 0;
-  Notification finish_processing;
+  absl::Notification finish_processing;
   auto queue_callback = [&mu, &processed_batches, &finish_processing](
                             std::unique_ptr<Batch<FakeTask>> batch) {
     ASSERT_TRUE(batch->IsClosed());
@@ -295,12 +288,22 @@ TEST(SerialDeviceBatchSchedulerTest, DeleteQueue) {
     TF_ASSERT_OK(ScheduleTask(800, queue.get()));
   }
   std::unique_ptr<Thread> queue_deleter(Env::Default()->StartThread(
-      {}, "QueueDeleterThread", [&queue, &mu, &processed_batches] {
+      {}, "QueueDeleterThread",
+      [&queue, &mu, &processed_batches, scheduler]() mutable {
         // Delete queue, should be kept alive until empty.
         queue.reset();
+        {
+          mutex_lock l(mu);
+          // queue may be destroyed before 2nd batch finishes processing.
+          EXPECT_GT(processed_batches, 0);
+        }
+        // Delete scheduler, should be kept alive until all batches processed.
+        scheduler.reset();
         mutex_lock l(mu);
         EXPECT_EQ(processed_batches, 2);
       }));
+  // Release reference to scheduler, queue and callback above should keep alive.
+  scheduler.reset();
   // Give queue_deleter thread time to delete queue.
   Env::Default()->SleepForMicroseconds(1000);
   finish_processing.Notify();
@@ -313,8 +316,8 @@ TEST(SerialDeviceBatchSchedulerTest, DeleteScheduler) {
   options.get_pending_on_serial_device = []() { return 0; };
   mutex mu;
   int processed_batches = 0;
-  Notification start_processing;
-  Notification finish_processing;
+  absl::Notification start_processing;
+  absl::Notification finish_processing;
   auto queue_callback =
       [&mu, &processed_batches, &start_processing,
        &finish_processing](std::unique_ptr<Batch<FakeTask>> batch) {
@@ -352,7 +355,7 @@ TEST(SerialDeviceBatchSchedulerTest, QueueCapacityInfo) {
   options.get_pending_on_serial_device = []() { return 0; };
   mutex mu;
   int processed_batches = 0;
-  Notification finish_processing;
+  absl::Notification finish_processing;
   auto queue_callback = [&mu, &processed_batches, &finish_processing](
                             std::unique_ptr<Batch<FakeTask>> batch) {
     ASSERT_TRUE(batch->IsClosed());
